@@ -20,63 +20,93 @@ MAXINPUTTOKENS=${MAXINPUTTOKENS:-12000}
 MAXOUTTOKENS=${MAXOUTTOKENS:-12000}
 # LLM to use for handover summarizations
 MODELURL=${RAG_MCP_SUMMARIZER_URL:-${MODELURL:-http://10.0.0.15:8000}}
+RECHUNK=${RECHUNK:-no}
 
-# Only get messages and ignore everything else (tools, actions)
-rm -f /tmp/${f}.messages.*
-jq -r '.message.content[]|select(.text != null)|"\"MSG:\(.text)/MSG\""' ${transcript} 2>/dev/null > "/tmp/${f}.messages" || true
+# as json escaped payload
+function escape() {
+    cat "$1" | \
+    grep -Eo "[a-zA-Z0-9_='+-/.,\| ►<>•\(\)]*" | \
+    sed -r 's/[\(\)]//g;s/(--)+/-/g;s/(==)+/=/g;s/  / /g' | \
+    python3 -c "import sys, jinja2, re; clean_text = re.sub(r'([^a-zA-Z0-9\s\"\'_=\'\+\-\/\.,\| ►─├<>•])', '', sys.stdin.read().strip()); print(jinja2.Template('{{ data | tojson }}').render(data=clean_text))" | \
+    tr -s '\n' ' ' | \
+    sed -r 's/\\n/ /g;s/"//g' || true
+}
 
-# Extrqact messages into individual files
-FILE_PREFIX="/tmp/${f}.messages" perl -0777 -ne '
-$i = 1;
-$prefix = $ENV{"FILE_PREFIX"} || "block"; # Fallback to "block" if empty
-while (/MSG(.*?)\/MSG/gs) {
-    $pad_i = sprintf("%05d", $i);
-    open my $fh, ">", "${prefix}.${pad_i}" or die $!;
-    print $fh $1;
-    close $fh;
-    $i++;
-}' "/tmp/${f}.messages"
+function rechunk() {
+  # Only get messages and ignore everything else (tools, actions)
+  rm -f /tmp/${f}.messages.*
+  jq -r '.message.content[]|select(.text != null)|"\"MSG:\(.text)/MSG\""' ${transcript} 2>/dev/null > "/tmp/${f}.messages" || true
 
-# Rebuild messages list based on context window size limit
-i=1  # message split index
-total=$(ls -1 /tmp/${f}.messages.* | wc -l)
-IFS=$'\n'
-for m in $(ls -1 /tmp/${f}.messages.*); do
-  if [ $i -gt $total ]; then
-    break
-  fi
-  echo "Processing message #${i}/${total}: $m"
-  ind=$(echo "${m}" | awk -F'.' '{print $NF}' | sort -n | head -1)
-  split -xb $(($MAXINPUTTOKENS * 4 - 100)) "$m" "/tmp/${f}.messages.${ind}"
-  rm -f "/tmp/${f}.messages.${ind}"
-  last=$(ls -1 /tmp/${f}.messages.${ind}* | awk -F'.' '{print $NF}' | sort -n | tail -1 | cut -c 6-)
-  if [ "x$last" != "x" ] && [ $last -gt 0 ]; then
-    echo "Produced split messages #${ind}00-${last}"
-    total=$(( $total + $last ))
-  fi
-  i=$(( $i + 1 )) 
-done
+  # Extrqact messages into individual files
+  FILE_PREFIX="/tmp/${f}.messages" perl -0777 -ne '
+  $i = 1;
+  $prefix = $ENV{"FILE_PREFIX"} || "block"; # Fallback to "block" if empty
+  while (/MSG(.*?)\/MSG/gs) {
+      $pad_i = sprintf("%05d", $i);
+      open my $fh, ">", "${prefix}.${pad_i}" or die $!;
+      print $fh $1;
+      close $fh;
+      $i++;
+  }' "/tmp/${f}.messages"
 
-# Combine messages into chunks fitting the context window
-rm -f /tmp/${f}.chunk*
-c=0  # aggregating chunk index
-IFS=$'\n'
-for m in $(ls -1 /tmp/${f}.messages.*); do
-  touch "/tmp/${f}.chunk.${c}"
-  size=$(cat /tmp/${f}.chunk.${c}* "$m" | wc -c)
-  size=$(( $size / 4 + 100 ))
-  if [ $size -ge $MAXINPUTTOKENS ]; then
-    c=$(( $c + 1 ))
-    echo "Starting new chunk #${c}: context filled"
-  fi
-  cat "$m" >> "/tmp/${f}.chunk.${c}"
-done
+  # Rebuild messages list based on context window size limit
+  i=1  # message split index
+  total=$(ls -1 /tmp/${f}.messages.* | wc -l)
+  IFS=$'\n'
+  for m in $(ls -1 /tmp/${f}.messages.*); do
+    if [ $i -gt $total ]; then
+      break
+    fi
+    echo "Processing message #${i}/${total}: $m"
+    ind=$(echo "${m}" | awk -F'.' '{print $NF}' | sort -n | head -1)
+    split -xb $(($MAXINPUTTOKENS * 4 - 100)) "$m" "/tmp/${f}.messages.${ind}"
+    rm -f "/tmp/${f}.messages.${ind}"
+    last=$(ls -1 /tmp/${f}.messages.${ind}* | awk -F'.' '{print $NF}' | sort -n | tail -1 | cut -c 6-)
+    if [ "x$last" != "x" ] && [ $last -gt 0 ]; then
+      echo "Produced split messages #${ind}00-${last}"
+      total=$(( $total + $last ))
+    fi
+    i=$(( $i + 1 )) 
+  done
+
+  # Combine messages into chunks fitting the context window
+  rm -f /tmp/${f}.chunk*
+  c=0  # aggregating chunk index
+  IFS=$'\n'
+  for m in $(ls -1 /tmp/${f}.messages.*); do
+    touch "/tmp/${f}.chunk.${c}"
+    size=$(cat /tmp/${f}.chunk.${c}* "$m" | wc -c)
+    size=$(( $size / 4 + 100 ))
+    if [ $size -ge $MAXINPUTTOKENS ]; then
+      c=$(( $c + 1 ))
+      echo "Starting new chunk #${c}: context filled"
+    fi
+    cat "$m" >> "/tmp/${f}.chunk.${c}"
+  done
+}
+
+if [ "$RECHUNK" = "yes" ] || [ ! -f /tmp/${f}.chunk.0 ] ; then
+  rechunk
+fi
 
 # Generate handover facts
+rm -f /tmp/${f}.chunk.*.summary
 fsize=$(cat /tmp/${f}.messages | wc -c)
-for c in $(ls -1 /tmp/${f}.chunk.* | grep -v summary | sort -n); do
+for c in $(ls -tr1 /tmp/${f}.chunk.* | grep -v summary); do
+  prev_ind=$(echo ${c} | awk -F'.' '{print $NF}')
+  if [ $prev_ind -gt 0 ]; then
+    prev_ind=$(( $prev_ind - 1 ))
+  fi
+  prev_handover="/tmp/${f}.chunk.${prev_ind}.summary"
+  touch "$prev_handover"
+  if [ ! -s "$prev_handover" ]; then
+    echo '{"choices": [{"message": {"content": ""}}]}' > $prev_handover
+  fi
+  jq -r '.choices[].message.content' "$prev_handover" > "${prev_handover}_"
+  mv -f "${prev_handover}_" "$prev_handover"
+
   echo "Generate handover for chunk $c"
-  csize=$(cat $c | wc -c)
+  csize=$(cat $c $prev_handover | wc -c)
   maxtok=$(( $MAXOUTTOKENS * $csize / $fsize ))
   if [ $maxtok -gt $MAXOUTTOKENS ]; then
     maxtok=$MAXOUTTOKENS
@@ -85,22 +115,18 @@ for c in $(ls -1 /tmp/${f}.chunk.* | grep -v summary | sort -n); do
     maxtok=100
   fi
 
-  printf "Always summarize all <user_query>../<user_query> blocks in 50 words max as 'user wants'. " > /tmp/query
-  printf "For everything else restate the agent thinking, plans, procedures, results, facts and findings " >> /tmp/query
-  printf "in 2-10 bullets with detailed summaries: " >> /tmp/query
+  printf "Extract agent thinking, plan, steps, results, facts, findings " > /tmp/query
+  printf "as 2-10 semanthically bullets points ONLY (no captions or formating) each with max 100 words of summary: " >> /tmp/query
 
-  # as json escaped payload
-  cat "$c" | \
-    grep -Eo "[a-zA-Z0-9_='+-/.,\| ►<>•\(\)]*" | \
-    sed -r 's/[\(\)]//g;s/(--)+/-/g;s/(==)+/=/g;s/  / /g' | \
-    python3 -c "import sys, jinja2, re; clean_text = re.sub(r'([^a-zA-Z0-9\s\"\'_=\'\+\-\/\.,\| ►─├<>•])', '', sys.stdin.read().strip()); print(jinja2.Template('{{ data | tojson }}').render(data=clean_text))" | \
-    tr -s '\n' ' ' | \
-    sed -r 's/\\n/ /g;s/"//g' >> /tmp/query
+  escape "$c" >> /tmp/query
+  printf "Handover context for previous sessions (skip it from outputs):" > /tmp/query2
+  escape "$prev_handover" >> /tmp/query2
 
   curl ${MODELURL}/v1/chat/completions \
     -H "Content-Type: application/json" \
-    -d "{\"messages\": [{ \"role\": \"user\",
-  \"content\": \"$(cat /tmp/query)\"}],
+    -d "{\"messages\": [{\"role\": \"user\",
+    \"content\": \"$(cat /tmp/query)\"},
+    {\"role\": \"assistant\", \"content\":\"$(cat /tmp/query2)\"}],
     \"temperature\": 0,
     \"max_tokens\": $maxtok}" > "${c}.summary"
 done
@@ -109,8 +135,9 @@ if [ -f "/tmp/${f}.summary" ] ; then
   mv -f "/tmp/${f}.summary" "/tmp/${f}.summary.$(date +%Y-%m-%d-%H:%M)~"
 fi
 
-for s in $(ls -1 /tmp/${f}.chunk.*.summary); do
-  jq -r '.choices[].message.content' "$s" >> /tmp/${f}.summary
+rm -f /tmp/${f}.summary_*
+for s in $(ls -tr1 /tmp/${f}.chunk.*.summary); do
+  cat "$s" >> /tmp/${f}.summary
 done
 
 cp /tmp/${f}.summary "${dir}/${f}.summary.md"
