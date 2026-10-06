@@ -13,11 +13,11 @@ f="$(basename ${transcript})"
 dir="$(dirname ${transcript})"
 
 # Max input can be given to the model (tokens), and to split long chunks by
-MAXINPUTTOKENS=${MAXINPUTTOKENS:-10000}
+MAXINPUTTOKENS=${MAXINPUTTOKENS:-12000}
 # Max output summarization tokens for the chat transcript.
 # Also provides max input tokens of the final chat handover document
 # The sum of both input and output tokens can't exceed the model max context size.
-MAXOUTTOKENS=${MAXOUTTOKENS:-10000}
+MAXOUTTOKENS=${MAXOUTTOKENS:-12000}
 # LLM to use for handover summarizations
 MODELURL=${RAG_MCP_SUMMARIZER_URL:-${MODELURL:-http://10.0.0.15:8000}}
 
@@ -74,7 +74,7 @@ done
 
 # Generate handover facts
 fsize=$(cat /tmp/${f}.messages | wc -c)
-for c in $(ls -1 /tmp/${f}.chunk.* | sort -n); do
+for c in $(ls -1 /tmp/${f}.chunk.* | grep -v summary | sort -n); do
   echo "Generate handover for chunk $c"
   csize=$(cat $c | wc -c)
   maxtok=$(( $MAXOUTTOKENS * $csize / $fsize ))
@@ -105,7 +105,7 @@ for c in $(ls -1 /tmp/${f}.chunk.* | sort -n); do
     \"max_tokens\": $maxtok}" > "${c}.summary"
 done
 
-if [ -f "/tmp/${f}.summary"] ; then
+if [ -f "/tmp/${f}.summary" ] ; then
   mv -f "/tmp/${f}.summary" "/tmp/${f}.summary.$(date +%Y-%m-%d-%H:%M)~"
 fi
 
