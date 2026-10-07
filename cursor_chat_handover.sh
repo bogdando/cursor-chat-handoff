@@ -3,6 +3,7 @@
 #
 # Example:
 # MODELURL=http://10.0.0.15:8000
+# BEHAVIOR="granite-4.2-3b:30k"
 # bash ~/cursor_chat_handover.sh ~/.cursor/projects/foo/agent-transcripts/36920837-4258-4ba4-9464-2fb5eb07cb75/36920837-4258-4ba4-9464-2fb5eb07cb75.jsonl
 #
 set -uex
@@ -11,6 +12,9 @@ set -o pipefail
 transcript="$1"
 f="$(basename ${transcript})"
 dir="$(dirname ${transcript})"
+
+# A model specific behavior marker for the summary file name
+BEHAVIOR=${BEHAVIOR:-unknown}
 
 # Execution control
 REPARSE=${REPARSE:-no}
@@ -158,13 +162,13 @@ done
 #jq -r '.choices[].message.content' "$prev_handover" > "${prev_handover}_"
 #mv -f "${prev_handover}_" "$prev_handover"
 
-if [ -f "/tmp/${f}.summary" ] ; then
-  mv -f "/tmp/${f}.summary" "/tmp/${f}.summary.$(date +%Y-%m-%d-%H:%M)~"
+if [ -f "/tmp/${f}.${BEHAVIOR}.summary" ] ; then
+  mv -f "/tmp/${f}.${BEHAVIOR}.summary" "/tmp/${f}.${BEHAVIOR}.summary.$(date +%Y-%m-%d-%H:%M)~"
 fi
 
 rm -f /tmp/${f}.summary_*
 for s in $(ls -tr1 /tmp/${f}.chunk.*.summary); do
-  cat "$s" >> /tmp/${f}.summary
+  cat "$s" | perl -ne 'print unless /^Okay,|^<think>/ .. /^<\/think>/' >> /tmp/${f}.${BEHAVIOR}.summary
 done
 
-cp /tmp/${f}.summary "${dir}/${f}.summary.md"
+cp /tmp/${f}.${BEHAVIOR}.summary "${dir}/${f}.${BEHAVIOR}.summary.md"
