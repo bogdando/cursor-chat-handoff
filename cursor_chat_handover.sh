@@ -6,7 +6,7 @@
 # BEHAVIOR="granite-4.2-3b:30k"
 # bash ~/cursor_chat_handover.sh ~/.cursor/projects/foo/agent-transcripts/36920837-4258-4ba4-9464-2fb5eb07cb75/36920837-4258-4ba4-9464-2fb5eb07cb75.jsonl
 #
-set -uex
+set -ue
 set -o pipefail
 
 transcript="$1"
@@ -19,22 +19,24 @@ BEHAVIOR=${BEHAVIOR:-unknown}
 # Execution control
 REPARSE=${REPARSE:-no}
 RECHUNK=${RECHUNK:-no}
-# Max input can be given to the model (tokens), and to split long chunks by
-MAXINPUTTOKENS=${MAXINPUTTOKENS:-25000}
+# Max input can be given to the model (tokens), and to split long chunks by.
+# Defaults work best for granite-4.2-3b with max context size 90000 tokens.
+MAXINPUTTOKENS=${MAXINPUTTOKENS:-35000}
 # Max output summarization tokens for the chat transcript.
 # Also provides max input tokens of the final chat handover document
-# The sum of both input and output tokens can't exceed the model max context size (i.e. 50000 here).
-MAXOUTTOKENS=${MAXOUTTOKENS:-${MAXINPUTTOKENS:-25000}}
+# The sum of both input and output tokens can't exceed the model max context size.
+MAXOUTTOKENS=${MAXOUTTOKENS:-${MAXINPUTTOKENS:-35000}}
 # LLM to use for handover summarizations
 MODELURL=${RAG_MCP_SUMMARIZER_URL:-${MODELURL:-http://10.0.0.15:8000}}
-# Either to provide previous session summaries for assistant role (confuses)
+# Either to provide previous chunks summary for assistant role as handover document for a next chunk
+# W/o handover docs each chunk summarized independently with zero previous context
 HANDOVER=${HANDOVER:-no}
 
 # Template the prompt as JSON escaped payload:
 # escape file1 file2(or /dev/null) maxtokens
 function escape() {
   local p1="Extract <user_query> blocks, agent plan, facts, findings, results "
-    p1+="as new uniq items only, then output as 2-5 bullets points, each max 100 words of summary"
+    p1+="as new uniq items only, then output summary as max 20 bullets, each max 200 words"
     local p2="Previous sessions summary (already processed, skip extracting bullets)"
     local tpl='{"messages": [{"role": "user", "content": "{{ (p1 + ": " + d1) | tojson }}"}, '
     tpl+='{"role": "assistant", "content": "{{ (p2 + ": " + d2) | tojson }}"}], "temperature": 0, "max_tokens": {{ mt }}}'
@@ -43,7 +45,7 @@ function escape() {
     sed -r 's/[\(\)]//g;s/(--)+/-/g;s/(==)+/=/g;s/"//g;s/  / /g' > "${1}_"
     d1=${1}_
     
-    if [ -f "$2" ]; then
+    if [ -s "$2" ]; then
       cat "$2" | \
       grep -Eo "[a-zA-Z0-9_='+-/.,\| ►<>•\(\)]*" | \
       sed -r 's/[\(\)]//g;s/(--)+/-/g;s/(==)+/=/g;s/"//g;s/  / /g' > "${2}_"
@@ -119,11 +121,12 @@ if [ "$RECHUNK" = "yes" ] || [ ! -f /tmp/${f}.chunk.0 ] ; then
   rechunk
 fi
 
-# Generate handover facts
 rm -f /tmp/${f}.chunk.*.summary
+rm -f /tmp/${f}.handovers
+touch /tmp/${f}.handovers
 fsize=$(cat /tmp/${f}.messages | wc -c)
-
-for c in $(ls -tr1 /tmp/${f}.chunk.* | grep -v summary); do
+# Generate inter-chunks handover facts or treat each as independent
+for c in $(ls -tr1 /tmp/${f}.chunk.* | grep -Ev 'summary|handover|_'); do
   echo "Generate handover for chunk $c"
   csize=$(cat "$c" | wc -c)
   prev_handover="/dev/null"
@@ -134,14 +137,11 @@ for c in $(ls -tr1 /tmp/${f}.chunk.* | grep -v summary); do
     fi
     prev_handover="/tmp/${f}.chunk.${prev_ind}.summary"
     touch "$prev_handover"
-    if [ ! -s "$prev_handover" ]; then
-      echo '{"choices": [{"message": {"content": ""}}]}' > $prev_handover
-    fi
-    jq -r '.choices[].message.content' "$prev_handover" > "${prev_handover}_"
-    mv -f "${prev_handover}_" "$prev_handover"
+    # Accumulate inter-chunk handovers
+    cat $prev_handover | perl -ne 'print unless /^Okay,|^<think>/ .. /^<\/think>/' >> "/tmp/${f}.handovers"
   fi
 
-  csize=$(cat "$c" "$prev_handover" | wc -c)
+  csize=$(cat "$c" "/tmp/${f}.handovers" | wc -c)
   maxtok=$(( $MAXOUTTOKENS * $csize / $fsize ))
   if [ $maxtok -gt $MAXOUTTOKENS ]; then
     maxtok=$MAXOUTTOKENS
@@ -150,25 +150,25 @@ for c in $(ls -tr1 /tmp/${f}.chunk.* | grep -v summary); do
     maxtok=100
   fi
 
-  escape "$c" "$prev_handover" $maxtok > /tmp/query
+  escape "$c" "/tmp/${f}.handovers" $maxtok > "${c}.query"
 
-  curl -X POST -d @/tmp/query "${MODELURL}/v1/chat/completions" -H "Content-Type: application/json" > "${c}.summary_"
+  curl -X POST -d @"${c}.query" "${MODELURL}/v1/chat/completions" -H "Content-Type: application/json" > "${c}.summary_"
   jq -r '.choices[].message.content' "${c}.summary_" > "${c}.summary"
 done
 
-# not sure about this one
-#prev_ind=$(( $prev_ind + 1 ))
-#prev_handover="/tmp/${f}.chunk.${prev_ind}.summary"
-#jq -r '.choices[].message.content' "$prev_handover" > "${prev_handover}_"
-#mv -f "${prev_handover}_" "$prev_handover"
-
+# Aggregate to produce the final handover document
 if [ -f "/tmp/${f}.${BEHAVIOR}.summary" ] ; then
   mv -f "/tmp/${f}.${BEHAVIOR}.summary" "/tmp/${f}.${BEHAVIOR}.summary.$(date +%Y-%m-%d-%H:%M)~"
 fi
 
 rm -f /tmp/${f}.summary_*
-for s in $(ls -tr1 /tmp/${f}.chunk.*.summary); do
-  cat "$s" | perl -ne 'print unless /^Okay,|^<think>/ .. /^<\/think>/' >> /tmp/${f}.${BEHAVIOR}.summary
-done
+if [ "$HANDOVER" = "yes" ]; then
+  cat "${c}.summary" | perl -ne 'print unless /^Okay,|^<think>/ .. /^<\/think>/' >> "/tmp/${f}.handovers"
+  mv -f "/tmp/${f}.handovers" "/tmp/${f}.${BEHAVIOR}.summary"
+else
+  for s in $(ls -tr1 /tmp/${f}.chunk.*.summary); do
+    cat "$s" | perl -ne 'print unless /^Okay,|^<think>/ .. /^<\/think>/' >> "/tmp/${f}.${BEHAVIOR}.summary"
+  done
+fi
 
-cp /tmp/${f}.${BEHAVIOR}.summary "${dir}/${f}.${BEHAVIOR}.summary.md"
+cp "/tmp/${f}.${BEHAVIOR}.summary" "${dir}/${f}.${BEHAVIOR}.summary.md"
