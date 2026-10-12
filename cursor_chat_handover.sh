@@ -59,6 +59,19 @@ function escape() {
     sed -r 's/\\n/ /g;s/\\"//g;s/""/"/g;s/\\\u[0-9]+\w?/ /g'
 }
 
+# Skip thinking steps, extract "bullet points" as best effort
+function extract(){
+  if [ ! -s "$1" ]; then
+    echo 
+    return
+  fi
+  cat "$1" | perl -ne 'print unless /^Okay,|^<think>/ .. /^<\/think>/' > "${1}.bullets"
+  if [ ! -s "${1}.bullets" ]; then
+    cat "$1" | grep -E '^(\*|-|([0-9]|[a-z])*[\.\)]) ' > "${1}.bullets"
+  fi
+  cat "${1}.bullets"
+}
+
 function reparse() {
   # Only get messages and ignore everything else (tools, actions)
   rm -f /tmp/${f}.messages.*
@@ -126,7 +139,7 @@ rm -f /tmp/${f}.handovers
 touch /tmp/${f}.handovers
 fsize=$(cat /tmp/${f}.messages | wc -c)
 # Generate inter-chunks handover facts or treat each as independent
-for c in $(ls -tr1 /tmp/${f}.chunk.* | grep -Ev 'summary|handover|_'); do
+for c in $(ls -tr1 /tmp/${f}.chunk.* | grep -Ev 'bullets|summary|handover|_'); do
   echo "Generate handover for chunk $c"
   csize=$(cat "$c" | wc -c)
   prev_handover="/dev/null"
@@ -138,7 +151,7 @@ for c in $(ls -tr1 /tmp/${f}.chunk.* | grep -Ev 'summary|handover|_'); do
     prev_handover="/tmp/${f}.chunk.${prev_ind}.summary"
     touch "$prev_handover"
     # Accumulate inter-chunk handovers
-    cat $prev_handover | perl -ne 'print unless /^Okay,|^<think>/ .. /^<\/think>/' >> "/tmp/${f}.handovers"
+    extract $prev_handover >> "/tmp/${f}.handovers"
   fi
 
   csize=$(cat "$c" "/tmp/${f}.handovers" | wc -c)
@@ -163,11 +176,11 @@ fi
 
 rm -f /tmp/${f}.summary_*
 if [ "$HANDOVER" = "yes" ]; then
-  cat "${c}.summary" | perl -ne 'print unless /^Okay,|^<think>/ .. /^<\/think>/' >> "/tmp/${f}.handovers"
+  extract "${c}.summary" >> "/tmp/${f}.handovers"
   mv -f "/tmp/${f}.handovers" "/tmp/${f}.${BEHAVIOR}.summary"
 else
   for s in $(ls -tr1 /tmp/${f}.chunk.*.summary); do
-    cat "$s" | perl -ne 'print unless /^Okay,|^<think>/ .. /^<\/think>/' >> "/tmp/${f}.${BEHAVIOR}.summary"
+    extract "$s" >> "/tmp/${f}.${BEHAVIOR}.summary"
   done
 fi
 
