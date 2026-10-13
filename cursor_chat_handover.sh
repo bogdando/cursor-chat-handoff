@@ -28,7 +28,7 @@ MAXINPUTTOKENS=${MAXINPUTTOKENS:-30000}
 # Max output summarization tokens for the chat transcript.
 # Also provides max input tokens of the final chat handover document
 # The sum of both input and output tokens can't exceed the model max context size.
-MAXOUTTOKENS=${MAXOUTTOKENS:-${MAXINPUTTOKENS:-40000}}
+MAXOUTTOKENS=${MAXOUTTOKENS:-${MAXINPUTTOKENS:-45000}}
 # LLM to use for handover summarizations
 MODELURL=${RAG_MCP_SUMMARIZER_URL:-${MODELURL:-http://10.0.0.15:8000}}
 # Either to provide previous chunks summary for assistant role as handover document for a next chunk
@@ -39,7 +39,7 @@ START_CHUNK=${START_CHUNK:-0}
 STOP_CHUNK=${STOP_CHUNK:-0}
 
 PSUM="Summarize changes, facts, findings, results as max 50 bullets ONLY"
-PDEDUP="Dedup repeated bullets. Always retain original uniq items. Never prefer ones over others."
+PDEDUP="Dedup repeated bullets. Always retain original uniq items. Never prefer ones over others. Compact neighbors to reduce high bullets count."
 
 # Template the prompt as JSON escaped payload:
 # escape file1 file2(or /dev/null) maxtokens
