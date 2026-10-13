@@ -21,19 +21,18 @@ REPARSE=${REPARSE:-no}
 RECHUNK=${RECHUNK:-no}
 # Max input can be given to the model (tokens), and to split long chunks by.
 # Defaults work best for granite-4.2-3b with max context size 90000 tokens.
-MAXINPUTTOKENS=${MAXINPUTTOKENS:-35000}
+MAXINPUTTOKENS=${MAXINPUTTOKENS:-30000}
 # Max output summarization tokens for the chat transcript.
 # Also provides max input tokens of the final chat handover document
 # The sum of both input and output tokens can't exceed the model max context size.
-MAXOUTTOKENS=${MAXOUTTOKENS:-${MAXINPUTTOKENS:-35000}}
+MAXOUTTOKENS=${MAXOUTTOKENS:-${MAXINPUTTOKENS:-40000}}
 # LLM to use for handover summarizations
 MODELURL=${RAG_MCP_SUMMARIZER_URL:-${MODELURL:-http://10.0.0.15:8000}}
 # Either to provide previous chunks summary for assistant role as handover document for a next chunk
 # W/o handover docs each chunk summarized independently with zero previous context
 HANDOVER=${HANDOVER:-no}
 
-PSUM="Extract <user_query> blocks, agent plan, facts, findings, results "
-PSUM+="as new uniq items only, then output summary as max 20 bullets, each max 200 words"
+PSUM="Summarize changes, facts, findings, results as max 50 bullets ONLY"
 PDEDUP="Dedup repeated bullets. Hide thinking and analyzed/dropped bullets to not show it in outputs"
 
 # Template the prompt as JSON escaped payload:
@@ -71,7 +70,7 @@ function extract(){
   fi
   cat "$1" | perl -ne 'print unless 1 .. /^<\/think>/' > "${1}.bullets"
   if [ ! -s "${1}.bullets" ]; then
-    cat "$1" | grep -E '^(\*|-|([0-9]|[a-z])*[\.\)]) ' > "${1}.bullets"
+    cat "$1" | grep -E '^\s*(•|\*|-|([0-9]|[a-z])*[\.\)]) ' > "${1}.bullets"
   fi
   cat "${1}.bullets"
 }
