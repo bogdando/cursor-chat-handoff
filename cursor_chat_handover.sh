@@ -6,6 +6,9 @@
 # BEHAVIOR="granite-4.2-3b:30k"
 # bash ~/cursor_chat_handover.sh ~/.cursor/projects/foo/agent-transcripts/36920837-4258-4ba4-9464-2fb5eb07cb75/36920837-4258-4ba4-9464-2fb5eb07cb75.jsonl
 #
+# Analyse how inter-chunks handover docs accumulate items and deduplicate them (starts from chunk #3):
+# diff /tmp/<uuid>.jsonl.chunk.<N>.handovers.bullets /tmp/<uuid>.jsonl.chunk.<N-1>.handovers.bullets
+#
 set -ue
 set -o pipefail
 
@@ -31,6 +34,9 @@ MODELURL=${RAG_MCP_SUMMARIZER_URL:-${MODELURL:-http://10.0.0.15:8000}}
 # Either to provide previous chunks summary for assistant role as handover document for a next chunk
 # W/o handover docs each chunk summarized independently with zero previous context
 HANDOVER=${HANDOVER:-no}
+# Custom chunk number to resume processing from / stop after (if >0)
+START_CHUNK=${START_CHUNK:-0}
+STOP_CHUNK=${STOP_CHUNK:-0}
 
 PSUM="Summarize changes, facts, findings, results as max 50 bullets ONLY"
 PDEDUP="Dedup repeated bullets. Hide thinking and analyzed/dropped bullets to not show it in outputs"
@@ -137,17 +143,24 @@ if [ "$RECHUNK" = "yes" ] || [ ! -f /tmp/${f}.chunk.0 ] ; then
   rechunk
 fi
 
-rm -f /tmp/${f}.chunk.*.summary*
-rm -f /tmp/${f}.handovers*
-touch /tmp/${f}.handovers
+if [ $START_CHUNK -eq 0 ]; then
+  rm -f /tmp/${f}.chunk.*.summary*
+  rm -f /tmp/${f}.handovers*
+  touch /tmp/${f}.handovers
+fi
 fsize=$(cat /tmp/${f}.messages | wc -c)
 # Generate inter-chunks handover facts or treat each as independent
-for c in $(ls -tr1 /tmp/${f}.chunk.* | grep -Ev 'bullets|summary|handover|_'); do
+for c in $(ls -tr1 /tmp/${f}.chunk.* | grep -Ev 'large|bullets|summary|handover|_'); do
+  prev_ind=$(echo ${c} | awk -F'.' '{print $NF}')
+  if [ $START_CHUNK -gt $prev_ind ]; then continue; fi
+  if [ $STOP_CHUNK -gt 0 ] && [ $STOP_CHUNK -le $prev_ind ]; then
+    echo "Stopping at chunk #$STOP_CHUNK"
+    break
+  fi
   echo "Generate handover for chunk $c"
   csize=$(cat "$c" | wc -c)
   prev_handover="/dev/null"
   if [ "$HANDOVER" = "yes" ]; then
-    prev_ind=$(echo ${c} | awk -F'.' '{print $NF}')
     if [ $prev_ind -gt 0 ]; then
       prev_ind=$(( $prev_ind - 1 ))
     fi
@@ -183,11 +196,24 @@ done
 if [ -f "/tmp/${f}.${BEHAVIOR}.summary" ] ; then
   mv -f "/tmp/${f}.${BEHAVIOR}.summary" "/tmp/${f}.${BEHAVIOR}.summary.$(date +%Y-%m-%d-%H:%M)~"
 fi
+# Non-deduplicated concatenation of all chunks summaries
+if [ -f "/tmp/${f}.${BEHAVIOR}.summary.large" ] ; then
+  mv -f "/tmp/${f}.${BEHAVIOR}.summary.large" "/tmp/${f}.${BEHAVIOR}.summary.large.$(date +%Y-%m-%d-%H:%M)~"
+fi
 
-rm -f /tmp/${f}.summary_*
 if [ "$HANDOVER" = "yes" ]; then
   extract "${c}.summary" >> "/tmp/${f}.handovers"
+  if [ $prev_ind -gt 1 ]; then
+    escape "/tmp/${f}.handovers" /dev/null "$MAXOUTTOKENS" "$PDEDUP" > /tmp/dedup_query
+    curl -X POST -d @/tmp/dedup_query "${MODELURL}/v1/chat/completions" -H "Content-Type: application/json" > "${c}.handovers_"
+    jq -r '.choices[].message.content' "${c}.handovers_" > "${c}.handovers"
+    extract "${c}.handovers" > "/tmp/${f}.handovers"
+  fi
   mv -f "/tmp/${f}.handovers" "/tmp/${f}.${BEHAVIOR}.summary"
+  for s in $(ls -tr1 /tmp/${f}.chunk.*.summary.bullets); do
+   cat "$s" >> "/tmp/${f}.${BEHAVIOR}.summary.large"
+  done
+  cp "/tmp/${f}.${BEHAVIOR}.summary.large" "${dir}/${f}.${BEHAVIOR}.summary.large.md"
 else
   for s in $(ls -tr1 /tmp/${f}.chunk.*.summary); do
     extract "$s" >> "/tmp/${f}.${BEHAVIOR}.summary"
