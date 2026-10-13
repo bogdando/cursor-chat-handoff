@@ -65,7 +65,7 @@ function extract(){
     echo 
     return
   fi
-  cat "$1" | perl -ne 'print unless /^Okay,|^<think>/ .. /^<\/think>/' > "${1}.bullets"
+  cat "$1" | perl -ne 'print unless 1 .. /^<\/think>/' > "${1}.bullets"
   if [ ! -s "${1}.bullets" ]; then
     cat "$1" | grep -E '^(\*|-|([0-9]|[a-z])*[\.\)]) ' > "${1}.bullets"
   fi
