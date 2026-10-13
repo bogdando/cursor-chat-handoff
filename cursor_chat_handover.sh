@@ -32,29 +32,33 @@ MODELURL=${RAG_MCP_SUMMARIZER_URL:-${MODELURL:-http://10.0.0.15:8000}}
 # W/o handover docs each chunk summarized independently with zero previous context
 HANDOVER=${HANDOVER:-no}
 
+PSUM="Extract <user_query> blocks, agent plan, facts, findings, results "
+PSUM+="as new uniq items only, then output summary as max 20 bullets, each max 200 words"
+PDEDUP="Dedup repeated bullets. Hide thinking and analyzed/dropped bullets to not show it in outputs"
+
 # Template the prompt as JSON escaped payload:
 # escape file1 file2(or /dev/null) maxtokens
 function escape() {
-  local p1="Extract <user_query> blocks, agent plan, facts, findings, results "
-    p1+="as new uniq items only, then output summary as max 20 bullets, each max 200 words"
-    local p2="Previous sessions summary (already processed, skip extracting bullets)"
+    local d1="${1}_"
+    local d2="$2"
+    local mt="$3"
+    local p1="${4:-$PSUM}"
+    local p2="Previous sessions summary"
     local tpl='{"messages": [{"role": "user", "content": "{{ (p1 + ": " + d1) | tojson }}"}, '
     tpl+='{"role": "assistant", "content": "{{ (p2 + ": " + d2) | tojson }}"}], "temperature": 0, "max_tokens": {{ mt }}}'
+
     cat "$1" | \
     grep -Eo "[a-zA-Z0-9_='+-/.,\| ►<>•\(\)]*" | \
-    sed -r 's/[\(\)]//g;s/(--)+/-/g;s/(==)+/=/g;s/"//g;s/  / /g' > "${1}_"
-    d1=${1}_
+    sed -r 's/[\(\)]//g;s/(--)+/-/g;s/(==)+/=/g;s/"//g;s/  / /g' > "${d1}"
     
-    if [ -s "$2" ]; then
-      cat "$2" | \
+    if [ -s "$d2" ]; then
+      cat "$d2" | \
       grep -Eo "[a-zA-Z0-9_='+-/.,\| ►<>•\(\)]*" | \
-      sed -r 's/[\(\)]//g;s/(--)+/-/g;s/(==)+/=/g;s/"//g;s/  / /g' > "${2}_"
-      d2="${2}_"
-    else
-      d2="$2"
+      sed -r 's/[\(\)]//g;s/(--)+/-/g;s/(==)+/=/g;s/"//g;s/  / /g' > "${d2}_"
+      d2="${d2}_"
     fi
 
-    python3 -c "import sys,jinja2,re; m=r'([^a-zA-Z0-9\s\"\'_=\'\+\-\/\.,\| ►─├<>•])'; t1=re.sub(m,'',open('$d1').read()); t2=re.sub(m,'',open('$d2').read()); print(jinja2.Template('$tpl').render(d1=t1,d2=t2,mt=$3,p1='$p1',p2='$p2'))" |\
+    python3 -c "import sys,jinja2,re; m=r'([^a-zA-Z0-9\s\"\'_=\'\+\-\/\.,\| ►─├<>•])'; t1=re.sub(m,'',open('$d1').read()); t2=re.sub(m,'',open('$d2').read()); print(jinja2.Template('$tpl').render(d1=t1,d2=t2,mt=$mt,p1='$p1',p2='$p2'))" |\
     tr -s '\n' ' ' |\
     sed -r 's/\\n/ /g;s/\\"//g;s/""/"/g;s/\\\u[0-9]+\w?/ /g'
 }
@@ -134,8 +138,8 @@ if [ "$RECHUNK" = "yes" ] || [ ! -f /tmp/${f}.chunk.0 ] ; then
   rechunk
 fi
 
-rm -f /tmp/${f}.chunk.*.summary
-rm -f /tmp/${f}.handovers
+rm -f /tmp/${f}.chunk.*.summary*
+rm -f /tmp/${f}.handovers*
 touch /tmp/${f}.handovers
 fsize=$(cat /tmp/${f}.messages | wc -c)
 # Generate inter-chunks handover facts or treat each as independent
@@ -150,8 +154,16 @@ for c in $(ls -tr1 /tmp/${f}.chunk.* | grep -Ev 'bullets|summary|handover|_'); d
     fi
     prev_handover="/tmp/${f}.chunk.${prev_ind}.summary"
     touch "$prev_handover"
-    # Accumulate inter-chunk handovers
+
+    # Accumulate dedupped inter-chunk handovers
     extract $prev_handover >> "/tmp/${f}.handovers"
+
+    if [ $prev_ind -gt 1 ]; then
+      escape "/tmp/${f}.handovers" /dev/null "$MAXOUTTOKENS" "$PDEDUP" > /tmp/dedup_query
+      curl -X POST -d @/tmp/dedup_query "${MODELURL}/v1/chat/completions" -H "Content-Type: application/json" > "${c}.handovers_"
+      jq -r '.choices[].message.content' "${c}.handovers_" > "${c}.handovers"
+      extract "${c}.handovers" > "/tmp/${f}.handovers"
+    fi
   fi
 
   csize=$(cat "$c" "/tmp/${f}.handovers" | wc -c)
@@ -163,8 +175,7 @@ for c in $(ls -tr1 /tmp/${f}.chunk.* | grep -Ev 'bullets|summary|handover|_'); d
     maxtok=100
   fi
 
-  escape "$c" "/tmp/${f}.handovers" $maxtok > "${c}.query"
-
+  escape "$c" "/tmp/${f}.handovers" "$maxtok" > "${c}.query" 
   curl -X POST -d @"${c}.query" "${MODELURL}/v1/chat/completions" -H "Content-Type: application/json" > "${c}.summary_"
   jq -r '.choices[].message.content' "${c}.summary_" > "${c}.summary"
 done
