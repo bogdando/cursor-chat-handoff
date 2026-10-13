@@ -39,7 +39,7 @@ START_CHUNK=${START_CHUNK:-0}
 STOP_CHUNK=${STOP_CHUNK:-0}
 
 PSUM="Summarize changes, facts, findings, results as max 50 bullets ONLY"
-PDEDUP="Dedup repeated bullets. Hide thinking and analyzed/dropped bullets to not show it in outputs"
+PDEDUP="Dedup repeated bullets. Always retain original uniq items. Never prefer ones over others."
 
 # Template the prompt as JSON escaped payload:
 # escape file1 file2(or /dev/null) maxtokens
