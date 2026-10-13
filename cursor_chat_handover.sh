@@ -70,13 +70,17 @@ function escape() {
 
 # Skip thinking steps, extract "bullet points" as best effort
 function extract(){
+  local bullets="^\s*(•|\*|-|([0-9]|[a-z])*[\.\)]) "
   if [ ! -s "$1" ]; then
     echo 
     return
   fi
   cat "$1" | perl -ne 'print unless 1 .. /^<\/think>/' > "${1}.bullets"
-  if [ ! -s "${1}.bullets" ]; then
-    cat "$1" | grep -E '^\s*(•|\*|-|([0-9]|[a-z])*[\.\)]) ' > "${1}.bullets"
+  if [ -s "${1}.bullets" ]; then
+    cat "${1}.bullets" | grep -E "$bullets" > "${1}.bullets_"
+    mv -f "${1}.bullets_" "${1}.bullets"
+  else
+    cat "$1" | grep -E "$bullets" > "${1}.bullets"
   fi
   cat "${1}.bullets"
 }
@@ -145,6 +149,7 @@ fi
 
 if [ $START_CHUNK -eq 0 ]; then
   rm -f /tmp/${f}.chunk.*.summary*
+  rm -f /tmp/${f}.chunk.*.handovers*
   rm -f /tmp/${f}.handovers*
   touch /tmp/${f}.handovers
 fi
