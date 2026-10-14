@@ -25,8 +25,8 @@ RECHUNK=${RECHUNK:-no}
 # Max input can be given to the model (tokens), and to split long chunks by.
 # Defaults work best for granite-4.2-3b with max context size 90000 tokens.
 MAXINPUTTOKENS=${MAXINPUTTOKENS:-30000}
-# Max output summarization tokens for the chat transcript.
-# Also provides max input tokens of the final chat handover document
+# Max output summarization tokens for chunks. 
+# We cannot estimate that for the whole chat transcript handover summary.
 # The sum of both input and output tokens can't exceed the model max context size.
 MAXOUTTOKENS=${MAXOUTTOKENS:-${MAXINPUTTOKENS:-45000}}
 # LLM to use for handover summarizations
@@ -49,8 +49,14 @@ function escape() {
     local mt="$3"
     local p1="${4:-$PSUM}"
     local p2="Previous sessions summary"
-    local tpl='{"messages": [{"role": "user", "content": "{{ (p1 + ": " + d1) | tojson }}"}, '
-    tpl+='{"role": "assistant", "content": "{{ (p2 + ": " + d2) | tojson }}"}], "temperature": 0, "max_tokens": {{ mt }}}'
+    local tpl
+    if  [ -s "$d2" ]; then
+      tpl='{"messages": [{"role": "user", "content": "{{ (p1 + ": " + d1) | tojson }}"}, '
+      tpl+='{"role": "assistant", "content": "{{ (p2 + ": " + d2) | tojson }}"}], "temperature": 0, "max_tokens": {{ mt }}}'
+    else
+      tpl='{"messages": [{"role": "user", "content": "{{ (p1 + ": " + d1) | tojson }}"}'
+      tpl+='], "temperature": 0, "max_tokens": {{ mt }}}'
+    fi
 
     cat "$1" | \
     grep -Eo "[a-zA-Z0-9_='+-/.,\| ►<>•\(\)]*" | \
@@ -153,21 +159,23 @@ if [ $START_CHUNK -eq 0 ]; then
   rm -f /tmp/${f}.handovers*
   touch /tmp/${f}.handovers
 fi
-fsize=$(cat /tmp/${f}.messages | wc -c)
+
+fsize=$(escape /tmp/${f}.messages /dev/null "$MAXOUTTOKENS" "" | cut -c)
 # Generate inter-chunks handover facts or treat each as independent
+prev_ind=0
 for c in $(ls -tr1 /tmp/${f}.chunk.* | grep -Ev 'large|bullets|summary|handover|_'); do
-  prev_ind=$(echo ${c} | awk -F'.' '{print $NF}')
-  if [ $START_CHUNK -gt $prev_ind ]; then continue; fi
-  if [ $STOP_CHUNK -gt 0 ] && [ $STOP_CHUNK -le $prev_ind ]; then
+  ind=$(echo ${c} | awk -F'.' '{print $NF}')
+  ind=$(( $ind + 0 ))
+  if [ $START_CHUNK -gt $ind ]; then continue; fi
+  if [ $STOP_CHUNK -gt 0 ] && [ $STOP_CHUNK -le $ind ]; then
     echo "Stopping at chunk #$STOP_CHUNK"
     break
   fi
   echo "Generate handover for chunk $c"
-  csize=$(cat "$c" | wc -c)
   prev_handover="/dev/null"
   if [ "$HANDOVER" = "yes" ]; then
-    if [ $prev_ind -gt 0 ]; then
-      prev_ind=$(( $prev_ind - 1 ))
+    if [ $ind -gt 0 ]; then
+      prev_ind=$(( $ind - 1 ))
     fi
     prev_handover="/tmp/${f}.chunk.${prev_ind}.summary"
     touch "$prev_handover"
@@ -184,15 +192,19 @@ for c in $(ls -tr1 /tmp/${f}.chunk.* | grep -Ev 'large|bullets|summary|handover|
   fi
 
   csize=$(cat "$c" "/tmp/${f}.handovers" | wc -c)
-  maxtok=$(( $MAXOUTTOKENS * $csize / $fsize ))
+  maxtok=$(( $MAXOUTTOKENS * $csize / $fsize * 50 ))
   if [ $maxtok -gt $MAXOUTTOKENS ]; then
     maxtok=$MAXOUTTOKENS
   fi
-  if [ $maxtok -lt 100 ]; then
-    maxtok=100
+  if [ $maxtok -lt 500 ]; then
+    maxtok=500
   fi
 
-  escape "$c" "/tmp/${f}.handovers" "$maxtok" > "${c}.query" 
+  if [ "$HANDOVER" = "yes" ] && [ $ind -gt 0 ]; then
+    escape "$c" "/tmp/${f}.handovers" "$maxtok" > "${c}.query" 
+  else
+    escape "$c" /dev/null "$maxtok" > "${c}.query" 
+  fi
   curl -X POST -d @"${c}.query" "${MODELURL}/v1/chat/completions" -H "Content-Type: application/json" > "${c}.summary_"
   jq -r '.choices[].message.content' "${c}.summary_" > "${c}.summary"
 done
