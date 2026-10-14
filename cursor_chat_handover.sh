@@ -38,7 +38,7 @@ HANDOVER=${HANDOVER:-no}
 START_CHUNK=${START_CHUNK:-0}
 STOP_CHUNK=${STOP_CHUNK:-0}
 
-PSUM="Summarize changes, facts, findings, results as max 50 bullets ONLY"
+PSUM="Extract detailed summary for key facts, findings, changes made and results achieved, as dashed bullets ONLY"
 PDEDUP="Dedup repeated bullets. Always retain original uniq items. Never prefer ones over others. Compact neighbors to reduce high bullets count."
 
 # Template the prompt as JSON escaped payload:
