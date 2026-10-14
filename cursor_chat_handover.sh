@@ -28,7 +28,7 @@ MAXINPUTTOKENS=${MAXINPUTTOKENS:-30000}
 # Max output summarization tokens for chunks. 
 # We cannot estimate that for the whole chat transcript handover summary.
 # The sum of both input and output tokens can't exceed the model max context size.
-MAXOUTTOKENS=${MAXOUTTOKENS:-${MAXINPUTTOKENS:-45000}}
+MAXOUTTOKENS=${MAXOUTTOKENS:-${MAXINPUTTOKENS:-50000}}
 # LLM to use for handover summarizations
 MODELURL=${RAG_MCP_SUMMARIZER_URL:-${MODELURL:-http://10.0.0.15:8000}}
 # Either to provide previous chunks summary for assistant role as handover document for a next chunk
@@ -42,9 +42,9 @@ PSUM="Summarize changes, facts, findings, results as max 50 bullets ONLY"
 PDEDUP="Dedup repeated bullets. Always retain original uniq items. Never prefer ones over others. Compact neighbors to reduce high bullets count."
 
 # Template the prompt as JSON escaped payload:
-# escape file1 file2(or /dev/null) maxtokens
+# escape file file2(or /dev/null) maxtokens 
 function escape() {
-    local d1="${1}_"
+    local d1="$1"
     local d2="$2"
     local mt="$3"
     local p1="${4:-$PSUM}"
@@ -58,9 +58,10 @@ function escape() {
       tpl+='], "temperature": 0, "max_tokens": {{ mt }}}'
     fi
 
-    cat "$1" | \
+    cat "$d1" | \
     grep -Eo "[a-zA-Z0-9_='+-/.,\| ►<>•\(\)]*" | \
-    sed -r 's/[\(\)]//g;s/(--)+/-/g;s/(==)+/=/g;s/"//g;s/  / /g' > "${d1}"
+    sed -r 's/[\(\)]//g;s/(--)+/-/g;s/(==)+/=/g;s/"//g;s/  / /g' > "${d1}_"
+    d1="${d1}_"
     
     if [ -s "$d2" ]; then
       cat "$d2" | \
@@ -93,7 +94,7 @@ function extract(){
 
 function reparse() {
   # Only get messages and ignore everything else (tools, actions)
-  rm -f /tmp/${f}.messages.*
+  rm -f /tmp/${f}.messages*
   jq -r '.message.content[]|select(.text != null)|"\"MSG:\(.text)/MSG\""' ${transcript} 2>/dev/null > "/tmp/${f}.messages" || true
 
   # Extrqact messages into individual files
@@ -110,14 +111,16 @@ function reparse() {
 
   # Rebuild messages list based on context window size limit
   i=1  # message split index
-  total=$(ls -1 /tmp/${f}.messages.* | wc -l)
+  total=$(ls -1 /tmp/${f}.messages.* | grep -Ev '_|__' | wc -l)
   IFS=$'\n'
-  for m in $(ls -1 /tmp/${f}.messages.*); do
+  for m in $(ls -1 /tmp/${f}.messages.* | grep -Ev '_|__'); do
     if [ $i -gt $total ]; then
       break
     fi
     echo "Processing message #${i}/${total}: $m"
-    ind=$(echo "${m}" | awk -F'.' '{print $NF}' | sort -n | head -1)
+    escape "$m" /dev/null 0 STARTMARK > "${m}__"
+    jq -r '.messages[].content' "${m}__" | awk -F'STARTMARK: ' '{print $NF}' > "$m"
+    ind=$(echo "$m" | awk -F'.' '{print $NF}' | sort -n | head -1)
     split -xb $(($MAXINPUTTOKENS * 4 - 100)) "$m" "/tmp/${f}.messages.${ind}"
     rm -f "/tmp/${f}.messages.${ind}"
     last=$(ls -1 /tmp/${f}.messages.${ind}* | awk -F'.' '{print $NF}' | sort -n | tail -1 | cut -c 6-)
@@ -134,7 +137,7 @@ function rechunk() {
   rm -f /tmp/${f}.chunk*
   c=0  # aggregating chunk index
   IFS=$'\n'
-  for m in $(ls -1 /tmp/${f}.messages.*); do
+  for m in $(ls -1 /tmp/${f}.messages.* | grep -Ev '_|__'); do
     touch "/tmp/${f}.chunk.${c}"
     size=$(cat /tmp/${f}.chunk.${c}* "$m" | wc -c)
     size=$(( $size / 4 + 100 ))
@@ -149,6 +152,8 @@ function rechunk() {
 if [ "$REPARSE" = "yes" ] || [ ! -f /tmp/${f}.messages.0000100 ] ; then
   reparse
 fi
+fsize=$(cat /tmp/${f}.messages | wc -c)
+
 if [ "$RECHUNK" = "yes" ] || [ ! -f /tmp/${f}.chunk.0 ] ; then
   rechunk
 fi
@@ -160,7 +165,6 @@ if [ $START_CHUNK -eq 0 ]; then
   touch /tmp/${f}.handovers
 fi
 
-fsize=$(escape /tmp/${f}.messages /dev/null "$MAXOUTTOKENS" "" | cut -c)
 # Generate inter-chunks handover facts or treat each as independent
 prev_ind=0
 for c in $(ls -tr1 /tmp/${f}.chunk.* | grep -Ev 'large|bullets|summary|handover|_'); do
