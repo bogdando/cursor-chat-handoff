@@ -2,8 +2,14 @@
 # Summarize Cursor chat transcripts per a message
 #
 # Example:
+# Model for summarization of chat history chunks
+# MODEL="ibm-granite/granite-4.2-3b"
 # MODELURL=http://10.0.0.15:8000
-# BEHAVIOR="granite-4.2-3b:30k"
+# Model for deduplication of handover document bullet points
+# APIKEY2=foo
+# MODEL2="rits/zai-org/glm-5-3"
+# MODELURL2=http://10.0.0.15:8000
+# BEHAVIOR="granite-4.2-3b:glm-5-3:30k"
 # bash ~/cursor_chat_handover.sh ~/.cursor/projects/foo/agent-transcripts/36920837-4258-4ba4-9464-2fb5eb07cb75/36920837-4258-4ba4-9464-2fb5eb07cb75.jsonl
 #
 # Analyse how inter-chunks handover docs accumulate items and deduplicate them (starts from chunk #3):
@@ -22,24 +28,42 @@ BEHAVIOR=${BEHAVIOR:-unknown}
 # Execution control
 REPARSE=${REPARSE:-no}
 RECHUNK=${RECHUNK:-no}
-# Max input can be given to the model (tokens), and to split long chunks by.
+# Max input can be given to the either model (in tokens), and to split long chunks by.
 # Defaults work best for granite-4.2-3b with max context size 90000 tokens.
 MAXINPUTTOKENS=${MAXINPUTTOKENS:-30000}
 # Max output summarization tokens for chunks. 
 # We cannot estimate that for the whole chat transcript handover summary.
 # The sum of both input and output tokens can't exceed the model max context size.
 MAXOUTTOKENS=${MAXOUTTOKENS:-${MAXINPUTTOKENS:-50000}}
-# LLM to use for handover summarizations
-MODELURL=${RAG_MCP_SUMMARIZER_URL:-${MODELURL:-http://10.0.0.15:8000}}
+# LLM to use for handover chunks summarizations as bullets
+APIKEY=${APIKEY:-x}
+MODEL=${MODEL:-ibm-granite/granite-4.2-3b}
+MODELURL=${MODELURL:-http://10.0.0.15:8000}
+# Optional LLM to use for deduplication of accumulated bullets during consequent chunks handovers
+APIKEY2=${APIKEY2:-x}
+MODEL2=${MODEL2:-${MODEL:-ibm-granite/granite-4.2-3b}}
+MODELURL2=${MODELURL2:-${MODELURL:-http://10.0.0.15:8000}}
 # Either to provide previous chunks summary for assistant role as handover document for a next chunk
-# W/o handover docs each chunk summarized independently with zero previous context
-HANDOVER=${HANDOVER:-no}
+# W/o handover docs each chunk is summarized independently with zero previous context handed to LLM
+HANDOVER=${HANDOVER:-yes}
 # Custom chunk number to resume processing from / stop after (if >0)
 START_CHUNK=${START_CHUNK:-0}
 STOP_CHUNK=${STOP_CHUNK:-0}
 
 PSUM="Extract detailed summary for key facts, findings, changes made and results achieved, as dashed bullets ONLY"
 PDEDUP="Dedup repeated bullets. Always retain original uniq items. Never prefer ones over others. Compact neighbors to reduce high bullets count."
+
+# Query LLM endpoint for JSON payload from file name input arg
+function query(){
+  local f="$1"
+  local key="${2:-$APIKEY}"
+  local url="${3:-$MODELURL}"
+  if [ "$key" != "x" ]; then
+    curl -X POST -d @"$1" "${url}/v1/chat/completions" -H "Content-Type: application/json" -H "Authorization: Bearer $key"
+  else
+    curl -X POST -d @"$1" "${url}/v1/chat/completions" -H "Content-Type: application/json"
+  fi
+}
 
 # Template the prompt as JSON escaped payload:
 # escape file file2(or /dev/null) maxtokens 
@@ -49,14 +73,13 @@ function escape() {
     local mt="$3"
     local p1="${4:-$PSUM}"
     local p2="Previous sessions summary"
+    local m="${5:-$MODEL}"
     local tpl
+    tpl='{"messages": [{"role": "user", "content": "{{ (p1 + ": " + d1) | tojson }}"}'
     if  [ -s "$d2" ]; then
-      tpl='{"messages": [{"role": "user", "content": "{{ (p1 + ": " + d1) | tojson }}"}, '
-      tpl+='{"role": "assistant", "content": "{{ (p2 + ": " + d2) | tojson }}"}], "temperature": 0, "max_tokens": {{ mt }}}'
-    else
-      tpl='{"messages": [{"role": "user", "content": "{{ (p1 + ": " + d1) | tojson }}"}'
-      tpl+='], "temperature": 0, "max_tokens": {{ mt }}}'
+      tpl+=',{"role": "assistant", "content": "{{ (p2 + ": " + d2) | tojson }}"}'
     fi
+    tpl+='], "temperature": 0, "max_tokens": {{ mt }}, "model": "{{ m }}"}'
 
     cat "$d1" | \
     grep -Eo "[a-zA-Z0-9_='+-/.,\| ►<>•\(\)]*" | \
@@ -70,7 +93,7 @@ function escape() {
       d2="${d2}_"
     fi
 
-    python3 -c "import sys,jinja2,re; m=r'([^a-zA-Z0-9\s\"\'_=\'\+\-\/\.,\| ►─├<>•])'; t1=re.sub(m,'',open('$d1').read()); t2=re.sub(m,'',open('$d2').read()); print(jinja2.Template('$tpl').render(d1=t1,d2=t2,mt=$mt,p1='$p1',p2='$p2'))" |\
+    python3 -c "import sys,jinja2,re; m=r'([^a-zA-Z0-9\s\"\'_=\'\+\-\/\.,\| ►─├<>•])'; t1=re.sub(m,'',open('$d1').read()); t2=re.sub(m,'',open('$d2').read()); print(jinja2.Template('$tpl').render(d1=t1,d2=t2,mt=$mt,p1='$p1',p2='$p2',m='$m'))" |\
     tr -s '\n' ' ' |\
     sed -r 's/\\n/ /g;s/\\"//g;s/""/"/g;s/\\\u[0-9]+\w?/ /g'
 }
@@ -124,7 +147,7 @@ function reparse() {
     split -xb $(($MAXINPUTTOKENS * 4 - 100)) "$m" "/tmp/${f}.messages.${ind}"
     rm -f "/tmp/${f}.messages.${ind}"
     last=$(ls -1 /tmp/${f}.messages.${ind}* | awk -F'.' '{print $NF}' | sort -n | tail -1 | cut -c 6-)
-    if [ "x$last" != "x" ] && [ $last -gt 0 ]; then
+    if [ "${last:-x}" != "x" ] && [ $last -gt 0 ]; then
       echo "Produced split messages #${ind}00-${last}"
       total=$(( $total + $last ))
     fi
@@ -188,8 +211,9 @@ for c in $(ls -tr1 /tmp/${f}.chunk.* | grep -Ev 'large|bullets|summary|handover|
     extract $prev_handover >> "/tmp/${f}.handovers"
 
     if [ $prev_ind -gt 1 ]; then
-      escape "/tmp/${f}.handovers" /dev/null "$MAXOUTTOKENS" "$PDEDUP" > /tmp/dedup_query
-      curl -X POST -d @/tmp/dedup_query "${MODELURL}/v1/chat/completions" -H "Content-Type: application/json" > "${c}.handovers_"
+      escape "/tmp/${f}.handovers" /dev/null "$MAXOUTTOKENS" "$PDEDUP" "$MODEL2" > /tmp/dedup_query
+      echo "Deduplicate bullets with model $MODEL2"
+      query /tmp/dedup_query "$APIKEY2" "$MODELURL2" > "${c}.handovers_"
       jq -r '.choices[].message.content' "${c}.handovers_" > "${c}.handovers"
       extract "${c}.handovers" > "/tmp/${f}.handovers"
     fi
@@ -209,7 +233,8 @@ for c in $(ls -tr1 /tmp/${f}.chunk.* | grep -Ev 'large|bullets|summary|handover|
   else
     escape "$c" /dev/null "$maxtok" > "${c}.query" 
   fi
-  curl -X POST -d @"${c}.query" "${MODELURL}/v1/chat/completions" -H "Content-Type: application/json" > "${c}.summary_"
+  echo "Summarize as bullets with model $MODEL"
+  query "${c}.query" > "${c}.summary_"
   jq -r '.choices[].message.content' "${c}.summary_" > "${c}.summary"
 done
 
@@ -225,8 +250,9 @@ fi
 if [ "$HANDOVER" = "yes" ]; then
   extract "${c}.summary" >> "/tmp/${f}.handovers"
   if [ $prev_ind -gt 1 ]; then
-    escape "/tmp/${f}.handovers" /dev/null "$MAXOUTTOKENS" "$PDEDUP" > /tmp/dedup_query
-    curl -X POST -d @/tmp/dedup_query "${MODELURL}/v1/chat/completions" -H "Content-Type: application/json" > "${c}.handovers_"
+    escape "/tmp/${f}.handovers" /dev/null "$MAXOUTTOKENS" "$PDEDUP" "$MODEL2" > /tmp/dedup_query
+    echo "Deduplicate bullets with model $MODEL2"
+    query /tmp/dedup_query "$APIKEY2" "$MODELURL2" > "${c}.handovers_"
     jq -r '.choices[].message.content' "${c}.handovers_" > "${c}.handovers"
     extract "${c}.handovers" > "/tmp/${f}.handovers"
   fi
