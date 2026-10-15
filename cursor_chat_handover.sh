@@ -190,7 +190,7 @@ fi
 
 # Generate inter-chunks handover facts or treat each as independent
 prev_ind=0
-for c in $(ls -tr1 /tmp/${f}.chunk.* | grep -Ev 'large|bullets|summary|handover|_'); do
+for c in $(ls -tr1 /tmp/${f}.chunk.* | grep -Ev 'query|large|bullets|summary|handover|_'); do
   ind=$(echo ${c} | awk -F'.' '{print $NF}')
   ind=$(( $ind + 0 ))
   if [ $START_CHUNK -gt $ind ]; then continue; fi
