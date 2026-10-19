@@ -9,8 +9,9 @@
 # APIKEY2=foo
 # MODEL2="rits/zai-org/glm-5-3"
 # MODELURL2=http://10.0.0.15:8000
-# BEHAVIOR="granite-4.2-3b:glm-5-3:30k"
-# bash ~/cursor_chat_handover.sh ~/.cursor/projects/foo/agent-transcripts/36920837-4258-4ba4-9464-2fb5eb07cb75/36920837-4258-4ba4-9464-2fb5eb07cb75.jsonl
+# BEHAVIOR="granite-4.2-3b:glm-5-3:60k:30k"
+# MAXINPUTTOKENS=60000 MAXOUTTOKENS=30000 bash ~/cursor_chat_handover.sh \
+#   ~/.cursor/projects/foo/agent-transcripts/<uuid>/<uuid>.jsonl
 #
 # Analyse how inter-chunks handover docs accumulate items and deduplicate them (starts from chunk #3):
 # diff /tmp/<uuid>.jsonl.chunk.<N>.handovers.bullets /tmp/<uuid>.jsonl.chunk.<N-1>.handovers.bullets
@@ -30,11 +31,11 @@ REPARSE=${REPARSE:-no}
 RECHUNK=${RECHUNK:-no}
 # Max input can be given to the either model (in tokens), and to split long chunks by.
 # Defaults work best for granite-4.2-3b with max context size 90000 tokens.
-MAXINPUTTOKENS=${MAXINPUTTOKENS:-30000}
+MAXINPUTTOKENS=${MAXINPUTTOKENS:-40000}
 # Max output summarization tokens for chunks. 
 # We cannot estimate that for the whole chat transcript handover summary.
 # The sum of both input and output tokens can't exceed the model max context size.
-MAXOUTTOKENS=${MAXOUTTOKENS:-${MAXINPUTTOKENS:-50000}}
+MAXOUTTOKENS=${MAXOUTTOKENS:-${MAXINPUTTOKENS:-40000}}
 # LLM to use for handover chunks summarizations as bullets
 APIKEY=${APIKEY:-x}
 MODEL=${MODEL:-ibm-granite/granite-4.2-3b}
@@ -207,8 +208,8 @@ for c in $(ls -tr1 /tmp/${f}.chunk.* | grep -Ev 'query|large|bullets|summary|han
     prev_handover="/tmp/${f}.chunk.${prev_ind}.summary"
     touch "$prev_handover"
 
-    # Accumulate dedupped inter-chunk handovers
-    extract $prev_handover >> "/tmp/${f}.handovers"
+      # Accumulate dedupped inter-chunk handovers
+      extract $prev_handover >> "/tmp/${f}.handovers"
 
     if [ $prev_ind -gt 1 ]; then
       escape "/tmp/${f}.handovers" /dev/null "$MAXOUTTOKENS" "$PDEDUP" "$MODEL2" > /tmp/dedup_query
