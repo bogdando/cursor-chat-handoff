@@ -1,6 +1,8 @@
 #!/bin/bash
 # Summarize Cursor chat transcripts per a message
 #
+# Prequire: pip install count-tokens
+#
 # Example:
 # Model for summarization of chat history chunks
 # MODEL="ibm-granite/granite-4.2-3b"
@@ -64,6 +66,21 @@ function query(){
   else
     curl -X POST -d @"$1" "${url}/v1/chat/completions" -H "Content-Type: application/json"
   fi
+}
+
+# Count actual tokens of the given files
+function tokencount() {
+  local out t total=0
+  [ $# -ge 1 ] || { echo 0; return; }
+  for t in "$@"; do
+    out=$(count-tokens --format json "$t" 2>/dev/null || true)
+    if [ "${out:-x}" = "x" ]; then
+      # Fallback to a rough 4 chars per token estimate w/o count-tokens working
+      out=$(( $(cat "$t" 2>/dev/null | wc -c) / 4 ))
+    fi
+    total=$(( $total + $out ))
+  done
+  echo "$total"
 }
 
 # Template the prompt as JSON escaped payload:
@@ -176,7 +193,10 @@ function rechunk() {
 if [ "$REPARSE" = "yes" ] || [ ! -f /tmp/${f}.messages.0000100 ] ; then
   reparse
 fi
-fsize=$(cat /tmp/${f}.messages | wc -c)
+# Total actual tokens of all chat history messages for the proportional
+# distribution of the output tokens budget across chunks
+totaltok=$(tokencount "/tmp/${f}.messages")
+[ "$totaltok" -gt 0 ] || totaltok=1
 
 if [ "$RECHUNK" = "yes" ] || [ ! -f /tmp/${f}.chunk.0 ] ; then
   rechunk
@@ -220,14 +240,30 @@ for c in $(ls -tr1 /tmp/${f}.chunk.* | grep -Ev 'query|large|bullets|summary|han
     fi
   fi
 
-  csize=$(cat "$c" "/tmp/${f}.handovers" | wc -c)
-  maxtok=$(( $MAXOUTTOKENS * $csize / $fsize * 50 ))
+  # Dynamically calculate the output tokens (mt) for the chunk from the actual
+  # tokens consumed by the input query chunk plus handovers: the proportional
+  # distribution of the MAXOUTTOKENS budget vs the total chat history messages
+  # tokens, scaled by 50, and capped by the model context window remaining
+  intok=$(tokencount "$c" "/tmp/${f}.handovers")
+  maxtok=$(( $MAXOUTTOKENS * $intok / $totaltok * 50 ))
+  remtok=$(( $MAXINPUTTOKENS + $MAXOUTTOKENS - $intok ))
+  if [ $remtok -lt 500 ]; then
+    echo "Output tokens budged exhausted!"
+    echo "Try another layout for MAXINPUTTOKENS vs MAXOUTTOKENS?"
+    echo "Use START_CHUNK=$ind for altered MAXOUTTOKENS to resume on chunk $ind"
+    echo "Or RECHUNK=yes, if changing MAXINPUTTOKENS (will start from scratch)"
+    exit 1
+  fi
+  if [ $maxtok -gt $remtok ]; then
+    maxtok=$remtok
+  fi
   if [ $maxtok -gt $MAXOUTTOKENS ]; then
     maxtok=$MAXOUTTOKENS
   fi
   if [ $maxtok -lt 500 ]; then
     maxtok=500
   fi
+  echo "Chunk #$ind: ${intok} actual input tokens of ${totaltok} total, ${maxtok} output tokens budget"
 
   if [ "$HANDOVER" = "yes" ] && [ $ind -gt 0 ]; then
     escape "$c" "/tmp/${f}.handovers" "$maxtok" > "${c}.query" 
