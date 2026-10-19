@@ -208,10 +208,10 @@ for c in $(ls -tr1 /tmp/${f}.chunk.* | grep -Ev 'query|large|bullets|summary|han
     prev_handover="/tmp/${f}.chunk.${prev_ind}.summary"
     touch "$prev_handover"
 
+    if [ $prev_ind -gt 1 ] && [ ! -s "${c}.handovers" ]; then
       # Accumulate dedupped inter-chunk handovers
       extract $prev_handover >> "/tmp/${f}.handovers"
 
-    if [ $prev_ind -gt 1 ]; then
       escape "/tmp/${f}.handovers" /dev/null "$MAXOUTTOKENS" "$PDEDUP" "$MODEL2" > /tmp/dedup_query
       echo "Deduplicate bullets with model $MODEL2"
       query /tmp/dedup_query "$APIKEY2" "$MODELURL2" > "${c}.handovers_"
