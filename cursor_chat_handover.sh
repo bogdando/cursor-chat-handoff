@@ -62,9 +62,9 @@ function query(){
   local key="${2:-$APIKEY}"
   local url="${3:-$MODELURL}"
   if [ "$key" != "x" ]; then
-    curl -X POST -d @"$1" "${url}/v1/chat/completions" -H "Content-Type: application/json" -H "Authorization: Bearer $key"
+    curl --fail-with-body -X POST -d @"$1" "${url}/v1/chat/completions" -H "Content-Type: application/json" -H "Authorization: Bearer $key"
   else
-    curl -X POST -d @"$1" "${url}/v1/chat/completions" -H "Content-Type: application/json"
+    curl --fail-with-body -X POST -d @"$1" "${url}/v1/chat/completions" -H "Content-Type: application/json"
   fi
 }
 
@@ -81,6 +81,42 @@ function tokencount() {
     total=$(( $total + $out ))
   done
   echo "$total"
+}
+
+# Dedup handover document after added chunk c summary into it
+function dedup(){
+  local rc=1
+  local f="$1"
+  local c="$2"
+  local ind="$3"
+  local summary="$4"
+  local sumtok=0
+  tok=null
+  tok=$(jq -r ".usage.completion_tokens" "/tmp/${f}.chunk.${ind}.handovers_" || echo 0)
+  if [ "$tok" = "null" ]; then
+    tok=0
+  fi
+  sumtok=$(tokencount "$summary")
+  handovertok=$(( $sumtok * 2 + $tok ))
+  if [ $handovertok -gt $MAXOUTTOKENS ]; then
+    handovertok=$MAXOUTTOKENS
+  fi
+  if [ $handovertok -lt 8000 ]; then
+    handovertok=8000
+  fi
+  echo "Deduplicate bullets with model $MODEL2"
+  escape "/tmp/${f}.handovers" /dev/null "$MAXOUTTOKENS" "$PDEDUP" "$MODEL2" > /tmp/dedup_query
+  set +e
+  query /tmp/dedup_query "$APIKEY2" "$MODELURL2" > "${c}.handovers_"
+  rc=$?
+  set -e
+  if [ $rc -ne 0 ]; then
+    echo "Deduplicate bullets with model $MODEL2 and max completion tokens $handovertok"
+    escape "/tmp/${f}.handovers" /dev/null "$handovertok" "$PDEDUP" "$MODEL2" > /tmp/dedup_query
+    query /tmp/dedup_query "$APIKEY2" "$MODELURL2" > "${c}.handovers_"
+  fi
+  jq -r '.choices[].message.content' "${c}.handovers_" > "${c}.handovers"
+  extract "${c}.handovers" > "/tmp/${f}.handovers"
 }
 
 # Template the prompt as JSON escaped payload:
@@ -220,23 +256,20 @@ for c in $(ls -tr1 /tmp/${f}.chunk.* | grep -Ev 'query|large|bullets|summary|han
     break
   fi
   echo "Generate handover for chunk $c"
-  prev_handover="/dev/null"
+  prev_summary="/dev/null"
   if [ "$HANDOVER" = "yes" ]; then
     if [ $ind -gt 0 ]; then
       prev_ind=$(( $ind - 1 ))
     fi
-    prev_handover="/tmp/${f}.chunk.${prev_ind}.summary"
-    touch "$prev_handover"
+    prev_summary="/tmp/${f}.chunk.${prev_ind}.summary"
+    touch "$prev_summary"
+    cat "/tmp/${f}.chunk.${prev_ind}.handovers.bullets" > "/tmp/${f}.handovers"
+    # Accumulate dedupped inter-chunk handovers
+    extract $prev_summary >> "/tmp/${f}.handovers"
 
     if [ $prev_ind -gt 1 ] && [ ! -s "${c}.handovers" ]; then
-      # Accumulate dedupped inter-chunk handovers
-      extract $prev_handover >> "/tmp/${f}.handovers"
-
-      escape "/tmp/${f}.handovers" /dev/null "$MAXOUTTOKENS" "$PDEDUP" "$MODEL2" > /tmp/dedup_query
-      echo "Deduplicate bullets with model $MODEL2"
-      query /tmp/dedup_query "$APIKEY2" "$MODELURL2" > "${c}.handovers_"
-      jq -r '.choices[].message.content' "${c}.handovers_" > "${c}.handovers"
-      extract "${c}.handovers" > "/tmp/${f}.handovers"
+      # create $c.handovers.bullets for next iteration
+      dedup "$f" "$c" "$prev_ind" "$prev_summary"
     fi
   fi
 
@@ -247,31 +280,47 @@ for c in $(ls -tr1 /tmp/${f}.chunk.* | grep -Ev 'query|large|bullets|summary|han
   intok=$(tokencount "$c" "/tmp/${f}.handovers")
   maxtok=$(( $MAXOUTTOKENS * $intok / $totaltok * 50 ))
   remtok=$(( $MAXINPUTTOKENS + $MAXOUTTOKENS - $intok ))
-  if [ $remtok -lt 500 ]; then
-    echo "Output tokens budged exhausted!"
-    echo "Try another layout for MAXINPUTTOKENS vs MAXOUTTOKENS?"
-    echo "Use START_CHUNK=$ind for altered MAXOUTTOKENS to resume on chunk $ind"
-    echo "Or RECHUNK=yes, if changing MAXINPUTTOKENS (will start from scratch)"
-    exit 1
-  fi
-  if [ $maxtok -gt $remtok ]; then
-    maxtok=$remtok
-  fi
-  if [ $maxtok -gt $MAXOUTTOKENS ]; then
-    maxtok=$MAXOUTTOKENS
-  fi
-  if [ $maxtok -lt 500 ]; then
-    maxtok=500
-  fi
-  echo "Chunk #$ind: ${intok} actual input tokens of ${totaltok} total, ${maxtok} output tokens budget"
+  rc=1
+  while [ $rc -ne 0 ]; do
+    if [ $remtok -lt 500 ]; then
+      echo "Output tokens budged exhausted!"
+      echo "Try another layout for MAXINPUTTOKENS vs MAXOUTTOKENS?"
+      echo "Use START_CHUNK=$ind for altered MAXOUTTOKENS to resume on chunk $ind"
+      echo "Or RECHUNK=yes, if changing MAXINPUTTOKENS (will start from scratch)"
+      exit 1
+    fi
+    if [ $maxtok -gt $remtok ]; then
+      maxtok=$remtok
+    fi
+    if [ $maxtok -gt $MAXOUTTOKENS ]; then
+      maxtok=$MAXOUTTOKENS
+    fi
+    if [ $maxtok -lt 500 ]; then
+      maxtok=500
+    fi
+    echo "Chunk #$ind: ${intok} actual input tokens of ${totaltok} total, ${maxtok} output tokens budget"
 
-  if [ "$HANDOVER" = "yes" ] && [ $ind -gt 0 ]; then
-    escape "$c" "/tmp/${f}.handovers" "$maxtok" > "${c}.query" 
-  else
-    escape "$c" /dev/null "$maxtok" > "${c}.query" 
-  fi
-  echo "Summarize as bullets with model $MODEL"
-  query "${c}.query" > "${c}.summary_"
+    if [ "$HANDOVER" = "yes" ] && [ $ind -gt 0 ]; then
+      escape "$c" "/tmp/${f}.handovers" "$maxtok" > "${c}.query" 
+    else
+      escape "$c" /dev/null "$maxtok" > "${c}.query" 
+    fi
+    echo "Summarize as bullets with model $MODEL"
+    set +e
+    query "${c}.query" > "${c}.summary_"
+    rc=$?
+    set -e
+
+    if [ $rc -ne 0 ]; then
+      result=$(jq -r ".error.message" "${c}.summary_" )
+      if grep -q 'reduce the length'<<<$result ; then
+        remtok=$(( $maxtok - 100 ))
+      else
+        echo "Unexpected error"
+        exit 1
+      fi
+    fi
+  done
   jq -r '.choices[].message.content' "${c}.summary_" > "${c}.summary"
 done
 
@@ -285,13 +334,12 @@ if [ -f "/tmp/${f}.${BEHAVIOR}.summary.large" ] ; then
 fi
 
 if [ "$HANDOVER" = "yes" ]; then
+  # pick the last handover
+  cat "/tmp/${f}.chunk.${prev_ind}.handovers.bullets" > "/tmp/${f}.handovers"
   extract "${c}.summary" >> "/tmp/${f}.handovers"
   if [ $prev_ind -gt 1 ]; then
-    escape "/tmp/${f}.handovers" /dev/null "$MAXOUTTOKENS" "$PDEDUP" "$MODEL2" > /tmp/dedup_query
-    echo "Deduplicate bullets with model $MODEL2"
-    query /tmp/dedup_query "$APIKEY2" "$MODELURL2" > "${c}.handovers_"
-    jq -r '.choices[].message.content' "${c}.handovers_" > "${c}.handovers"
-    extract "${c}.handovers" > "/tmp/${f}.handovers"
+    # create final $c.handovers.bullets
+    dedup "$f" "$c" "$ind" "${c}.summary"
   fi
   mv -f "/tmp/${f}.handovers" "/tmp/${f}.${BEHAVIOR}.summary"
   for s in $(ls -tr1 /tmp/${f}.chunk.*.summary.bullets); do
