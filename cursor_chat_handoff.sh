@@ -7,16 +7,16 @@
 # Model for summarization of chat history chunks
 # MODEL="ibm-granite/granite-4.2-3b"
 # MODELURL=http://10.0.0.15:8000
-# Model for deduplication of handover document bullet points
+# Model for deduplication of handoff document bullet points
 # APIKEY2=foo
 # MODEL2="rits/zai-org/glm-5-3"
 # MODELURL2=http://10.0.0.15:8000
 # BEHAVIOR="granite-4.2-3b:glm-5-3:60k:30k"
-# MAXINPUTTOKENS=60000 MAXOUTTOKENS=30000 bash ~/cursor_chat_handover.sh \
+# MAXINPUTTOKENS=60000 MAXOUTTOKENS=30000 bash ~/cursor_chat_handoff.sh \
 #   ~/.cursor/projects/foo/agent-transcripts/<uuid>/<uuid>.jsonl
 #
-# Analyse how inter-chunks handover docs accumulate items and deduplicate them (starts from chunk #3):
-# diff /tmp/<uuid>.jsonl.chunk.<N>.handovers.bullets /tmp/<uuid>.jsonl.chunk.<N-1>.handovers.bullets
+# Analyse how inter-chunks handoff docs accumulate items and deduplicate them (starts from chunk #3):
+# diff /tmp/<uuid>.jsonl.chunk.<N>.handoffs.bullets /tmp/<uuid>.jsonl.chunk.<N-1>.handoffs.bullets
 #
 set -ue
 set -o pipefail
@@ -35,19 +35,19 @@ RECHUNK=${RECHUNK:-no}
 # Defaults work best for granite-4.2-3b with max context size 90000 tokens.
 MAXINPUTTOKENS=${MAXINPUTTOKENS:-40000}
 # Max output summarization tokens for chunks. 
-# We cannot estimate that for the whole chat transcript handover summary.
+# We cannot estimate that for the whole chat transcript handoff summary.
 # The sum of both input and output tokens can't exceed the model max context size.
 MAXOUTTOKENS=${MAXOUTTOKENS:-${MAXINPUTTOKENS:-40000}}
-# LLM to use for handover chunks summarizations as bullets
+# LLM to use for handoff chunks summarizations as bullets
 APIKEY=${APIKEY:-x}
 MODEL=${MODEL:-ibm-granite/granite-4.2-3b}
 MODELURL=${MODELURL:-http://10.0.0.15:8000}
-# Optional LLM to use for deduplication of accumulated bullets during consequent chunks handovers
+# Optional LLM to use for deduplication of accumulated bullets during consequent chunks handoffs
 APIKEY2=${APIKEY2:-x}
 MODEL2=${MODEL2:-${MODEL:-ibm-granite/granite-4.2-3b}}
 MODELURL2=${MODELURL2:-${MODELURL:-http://10.0.0.15:8000}}
-# Either to provide previous chunks summary for assistant role as handover document for a next chunk
-# W/o handover docs each chunk is summarized independently with zero previous context handed to LLM
+# Either to provide previous chunks summary for assistant role as handoff document for a next chunk
+# W/o handoff docs each chunk is summarized independently with zero previous context handed to LLM
 HANDOVER=${HANDOVER:-yes}
 # Custom chunk number to resume processing from / stop after (if >0)
 START_CHUNK=${START_CHUNK:-0}
@@ -84,7 +84,7 @@ function tokencount() {
   echo "$total"
 }
 
-# Eval tokens budgets and dedup handover document after added chunk c summary into it
+# Eval tokens budgets and dedup handoff document after added chunk c summary into it
 function dedup(){
   local rc=1
   local f="$1"
@@ -98,18 +98,18 @@ function dedup(){
   local delta=0
   local required=0
   local remtok=$MAXOUTTOKENS
-  tok=$(jq -r ".usage.completion_tokens" "/tmp/${f}.chunk.${ind}.handovers_" || echo 1)
+  tok=$(jq -r ".usage.completion_tokens" "/tmp/${f}.chunk.${ind}.handoffs_" || echo 1)
   tok="${tok:-null}"
   if [ "$tok" = "null" ]; then
     tok=1
   fi
   sumtok=$(tokencount "$summary")
-  # estimated from previous handover minimal completion tokens to fit next one without a cut
+  # estimated from previous handoff minimal completion tokens to fit next one without a cut
   # (at least for thinking steps, at most - for thinking plus output)
-  handovertok=$(( $sumtok * 3 / 2 + $tok ))
+  handofftok=$(( $sumtok * 3 / 2 + $tok ))
   rc=1
   while [ $rc -ne 0 ]; do
-    if [ $remtok -lt 5000 ] || [ $remtok -lt $handovertok ] || [ $(( $remtok - $handovertok )) -lt 200 ]; then
+    if [ $remtok -lt 5000 ] || [ $remtok -lt $handofftok ] || [ $(( $remtok - $handofftok )) -lt 200 ]; then
       echo "Contex window for deduplication model $MODEL2 is exhausted!"
       echo "Try another layout for MAXINPUTTOKENS and MAXOUTTOKENS?"
       echo "Use START_CHUNK=$ind for altered MAXOUTTOKENS to resume on chunk $ind"
@@ -117,16 +117,16 @@ function dedup(){
       exit 1
     fi
 
-    escape "/tmp/${f}.handovers" /dev/null "$MAXOUTTOKENS" "$PDEDUP" "$MODEL2" > /tmp/dedup_query
+    escape "/tmp/${f}.handoffs" /dev/null "$MAXOUTTOKENS" "$PDEDUP" "$MODEL2" > /tmp/dedup_query
     set +e
     echo "Deduplicate bullets with model $MODEL2 and max completion tokens $remtok"
-    escape "/tmp/${f}.handovers" /dev/null "$remtok" "$PDEDUP" "$MODEL2" > /tmp/dedup_query
-    query /tmp/dedup_query "$APIKEY2" "$MODELURL2" > "${c}.handovers_"
+    escape "/tmp/${f}.handoffs" /dev/null "$remtok" "$PDEDUP" "$MODEL2" > /tmp/dedup_query
+    query /tmp/dedup_query "$APIKEY2" "$MODELURL2" > "${c}.handoffs_"
     rc=$?
     set -e
     if [ $rc -ne 0 ] && [ $rc -eq 22 ]; then
       # bisect new value to try
-      remtok=$(( ($remtok + $handovertok) / 2 )) 
+      remtok=$(( ($remtok + $handofftok) / 2 )) 
       if [ $remtok -gt $MAXOUTTOKENS ]; then
         echo "Unexpected error: bisect value $remtok cannot exceed $MAXOUTTOKENS"
         echo "Try another layout for MAXINPUTTOKENS and MAXOUTTOKENS?"
@@ -141,29 +141,29 @@ function dedup(){
     fi
   done
 
-  # recalculate for the current handover
-  tok=$(jq -r ".usage.completion_tokens" "${c}.handovers_" || echo 1)
+  # recalculate for the current handoff
+  tok=$(jq -r ".usage.completion_tokens" "${c}.handoffs_" || echo 1)
   tok="${tok:-null}"
   if [ "$tok" = "null" ]; then
     tok=1
   fi
-  think=$(jq -r ".usage.completion_tokens_details.reasoning_tokens" "${c}.handovers_" || echo 1)
+  think=$(jq -r ".usage.completion_tokens_details.reasoning_tokens" "${c}.handoffs_" || echo 1)
   think="${think:-null}"
   if [ "$think" = "null" ]; then
     think=0
   fi
   delta=$(( $tok - $think ))
-  hand=$(tokencount "/tmp/${f}.handovers")
+  hand=$(tokencount "/tmp/${f}.handoffs")
   # assume deduplicated content would shrink the added chunk summary by a 3x times
   required=$(( $hand + $sumtok / 3 ))
   if [ $think -gt 1 ] && [ $delta -lt $required ]; then
     echo "Model $MODEL2 has spent its tokens budged on thinking: $delta left of ~$required needed for output)!"
     echo "Extract results from thinking steps instead of output(best effort)"
-    jq -r '.choices[].message.reasoning_content' "${c}.handovers_" | grep -E '^- \*\*' > "${c}.handovers"
+    jq -r '.choices[].message.reasoning_content' "${c}.handoffs_" | grep -E '^- \*\*' > "${c}.handoffs"
   else
-    jq -r '.choices[].message.content' "${c}.handovers_" > "${c}.handovers"
+    jq -r '.choices[].message.content' "${c}.handoffs_" > "${c}.handoffs"
   fi
-  extract "${c}.handovers" > "/tmp/${f}.handovers"
+  extract "${c}.handoffs" > "/tmp/${f}.handoffs"
 }
 
 # Template the prompt as JSON escaped payload:
@@ -287,14 +287,14 @@ fi
 
 if [ $START_CHUNK -eq 0 ]; then
   rm -f /tmp/${f}.chunk.*.summary*
-  rm -f /tmp/${f}.chunk.*.handovers*
-  rm -f /tmp/${f}.handovers*
-  touch /tmp/${f}.handovers
+  rm -f /tmp/${f}.chunk.*.handoffs*
+  rm -f /tmp/${f}.handoffs*
+  touch /tmp/${f}.handoffs
 fi
 
-# Generate inter-chunks handover facts or treat each as independent
+# Generate inter-chunks handoff facts or treat each as independent
 prev_ind=0
-for c in $(ls -tr1 /tmp/${f}.chunk.* | grep -Ev 'query|large|bullets|summary|handover|_'); do
+for c in $(ls -tr1 /tmp/${f}.chunk.* | grep -Ev 'query|large|bullets|summary|handoff|_'); do
   ind=$(echo ${c} | awk -F'.' '{print $NF}')
   ind=$(( $ind + 0 ))
   if [ $START_CHUNK -gt $ind ]; then continue; fi
@@ -302,7 +302,7 @@ for c in $(ls -tr1 /tmp/${f}.chunk.* | grep -Ev 'query|large|bullets|summary|han
     echo "Stopping at chunk #$STOP_CHUNK"
     break
   fi
-  echo "Generate handover for chunk $c"
+  echo "Generate handoff for chunk $c"
   prev_summary="/dev/null"
   if [ "$HANDOVER" = "yes" ]; then
     if [ $ind -gt 0 ]; then
@@ -310,21 +310,21 @@ for c in $(ls -tr1 /tmp/${f}.chunk.* | grep -Ev 'query|large|bullets|summary|han
     fi
     prev_summary="/tmp/${f}.chunk.${prev_ind}.summary"
     touch "$prev_summary"
-    cat "/tmp/${f}.chunk.${prev_ind}.handovers.bullets" > "/tmp/${f}.handovers"
-    # Accumulate dedupped inter-chunk handovers
-    extract $prev_summary >> "/tmp/${f}.handovers"
+    cat "/tmp/${f}.chunk.${prev_ind}.handoffs.bullets" > "/tmp/${f}.handoffs"
+    # Accumulate dedupped inter-chunk handoffs
+    extract $prev_summary >> "/tmp/${f}.handoffs"
 
-    if [ $prev_ind -gt 1 ] && [ ! -s "${c}.handovers" ]; then
-      # create $c.handovers.bullets for next iteration
+    if [ $prev_ind -gt 1 ] && [ ! -s "${c}.handoffs" ]; then
+      # create $c.handoffs.bullets for next iteration
       dedup "$f" "$c" "$prev_ind" "$prev_summary"
     fi
   fi
 
   # Dynamically calculate the output tokens (mt) for the chunk from the actual
-  # tokens consumed by the input query chunk plus handovers: the proportional
+  # tokens consumed by the input query chunk plus handoffs: the proportional
   # distribution of the MAXOUTTOKENS budget vs the total chat history messages
   # tokens, scaled by 50, and capped by the model context window remaining
-  intok=$(tokencount "$c" "/tmp/${f}.handovers")
+  intok=$(tokencount "$c" "/tmp/${f}.handoffs")
   maxtok=$(( $MAXOUTTOKENS * $intok / $totaltok * 50 ))
   remtok=$(( $MAXINPUTTOKENS + $MAXOUTTOKENS - $intok ))
   rc=1
@@ -348,7 +348,7 @@ for c in $(ls -tr1 /tmp/${f}.chunk.* | grep -Ev 'query|large|bullets|summary|han
     echo "Chunk #$ind: ${intok} actual input tokens of ${totaltok} total, ${maxtok} output tokens budget"
 
     if [ "$HANDOVER" = "yes" ] && [ $ind -gt 0 ]; then
-      escape "$c" "/tmp/${f}.handovers" "$maxtok" > "${c}.query" 
+      escape "$c" "/tmp/${f}.handoffs" "$maxtok" > "${c}.query" 
     else
       escape "$c" /dev/null "$maxtok" > "${c}.query" 
     fi
@@ -374,7 +374,7 @@ for c in $(ls -tr1 /tmp/${f}.chunk.* | grep -Ev 'query|large|bullets|summary|han
   jq -r '.choices[].message.content' "${c}.summary_" > "${c}.summary"
 done
 
-# Aggregate to produce the final handover document
+# Aggregate to produce the final handoff document
 if [ -f "/tmp/${f}.${BEHAVIOR}.summary" ] ; then
   mv -f "/tmp/${f}.${BEHAVIOR}.summary" "/tmp/${f}.${BEHAVIOR}.summary.$(date +%Y-%m-%d-%H:%M)~"
 fi
@@ -384,14 +384,14 @@ if [ -f "/tmp/${f}.${BEHAVIOR}.summary.large" ] ; then
 fi
 
 if [ "$HANDOVER" = "yes" ]; then
-  # pick the last handover
-  cat "/tmp/${f}.chunk.${prev_ind}.handovers.bullets" > "/tmp/${f}.handovers"
-  extract "${c}.summary" >> "/tmp/${f}.handovers"
+  # pick the last handoff
+  cat "/tmp/${f}.chunk.${prev_ind}.handoffs.bullets" > "/tmp/${f}.handoffs"
+  extract "${c}.summary" >> "/tmp/${f}.handoffs"
   if [ $prev_ind -gt 1 ]; then
-    # create final $c.handovers.bullets
+    # create final $c.handoffs.bullets
     dedup "$f" "$c" "$ind" "${c}.summary"
   fi
-  mv -f "/tmp/${f}.handovers" "/tmp/${f}.${BEHAVIOR}.summary"
+  mv -f "/tmp/${f}.handoffs" "/tmp/${f}.${BEHAVIOR}.summary"
   for s in $(ls -tr1 /tmp/${f}.chunk.*.summary.bullets); do
    cat "$s" >> "/tmp/${f}.${BEHAVIOR}.summary.large"
   done
