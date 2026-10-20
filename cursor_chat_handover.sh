@@ -280,7 +280,6 @@ for c in $(ls -tr1 /tmp/${f}.chunk.* | grep -Ev 'query|large|bullets|summary|han
   intok=$(tokencount "$c" "/tmp/${f}.handovers")
   maxtok=$(( $MAXOUTTOKENS * $intok / $totaltok * 50 ))
   remtok=$(( $MAXINPUTTOKENS + $MAXOUTTOKENS - $intok ))
-  rc=1
   while [ $rc -ne 0 ]; do
     if [ $remtok -lt 500 ]; then
       echo "Output tokens budged exhausted!"
@@ -306,10 +305,13 @@ for c in $(ls -tr1 /tmp/${f}.chunk.* | grep -Ev 'query|large|bullets|summary|han
       escape "$c" /dev/null "$maxtok" > "${c}.query" 
     fi
     echo "Summarize as bullets with model $MODEL"
-    set +e
-    query "${c}.query" > "${c}.summary_"
-    rc=$?
-    set -e
+    rc=0
+    if [ ! -s "${c}.summary" ]; then
+      set +e
+      query "${c}.query" > "${c}.summary_"
+      rc=$?
+      set -e
+    fi
 
     if [ $rc -ne 0 ]; then
       result=$(jq -r ".error.message" "${c}.summary_" )
