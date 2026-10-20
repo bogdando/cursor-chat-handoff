@@ -125,7 +125,7 @@ function dedup(){
     query /tmp/dedup_query "$APIKEY2" "$MODELURL2" > "${c}.handoffs_"
     rc=$?
     set -e
-    if [ $rc -ne 0 ] && [ $rc -eq 22 ]; then
+    if [ $rc -eq 22 ]; then
       # bisect new value to try
       remtok=$(( ($remtok + $handofftok) / 2 )) 
       if [ $remtok -gt $MAXOUTTOKENS ]; then
@@ -136,7 +136,7 @@ function dedup(){
       if [ $remtok -lt 5000 ]; then
         remtok=5000
       fi
-    else
+    elif [ $rc -ne 0 ]; then
       echo "Unexpected error"
       exit 1
     fi
