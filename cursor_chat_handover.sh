@@ -54,7 +54,8 @@ START_CHUNK=${START_CHUNK:-0}
 STOP_CHUNK=${STOP_CHUNK:-0}
 
 PSUM="Extract detailed summary for key facts, findings, changes made and results achieved, as dashed bullets ONLY"
-PDEDUP="Dedup repeated bullets. Always retain original uniq items. Never prefer ones over others. Compact neighbors to reduce high bullets count."
+PDEDUP="Dedup repeated bullets. Always retain original uniq items. Never prefer ones over others. Compact neighbors to reduce high bullets count. "
+PDEDUP+="Always think of final result as flattened bullets where lines start with dash and bold: - **"
 
 # Query LLM endpoint for JSON payload from file name input arg
 function query(){
@@ -83,7 +84,7 @@ function tokencount() {
   echo "$total"
 }
 
-# Dedup handover document after added chunk c summary into it
+# Eval tokens budgets and dedup handover document after added chunk c summary into it
 function dedup(){
   local rc=1
   local f="$1"
@@ -91,31 +92,77 @@ function dedup(){
   local ind="$3"
   local summary="$4"
   local sumtok=0
-  tok=null
-  tok=$(jq -r ".usage.completion_tokens" "/tmp/${f}.chunk.${ind}.handovers_" || echo 0)
+  local tok=null
+  local hand=0
+  local think=null
+  local delta=0
+  local required=0
+  local remtok=$MAXOUTTOKENS
+  tok=$(jq -r ".usage.completion_tokens" "/tmp/${f}.chunk.${ind}.handovers_" || echo 1)
+  tok="${tok:-null}"
   if [ "$tok" = "null" ]; then
-    tok=0
+    tok=1
   fi
   sumtok=$(tokencount "$summary")
-  handovertok=$(( $sumtok * 2 + $tok ))
-  if [ $handovertok -gt $MAXOUTTOKENS ]; then
-    handovertok=$MAXOUTTOKENS
-  fi
-  if [ $handovertok -lt 8000 ]; then
-    handovertok=8000
-  fi
-  echo "Deduplicate bullets with model $MODEL2"
-  escape "/tmp/${f}.handovers" /dev/null "$MAXOUTTOKENS" "$PDEDUP" "$MODEL2" > /tmp/dedup_query
-  set +e
-  query /tmp/dedup_query "$APIKEY2" "$MODELURL2" > "${c}.handovers_"
-  rc=$?
-  set -e
-  if [ $rc -ne 0 ]; then
-    echo "Deduplicate bullets with model $MODEL2 and max completion tokens $handovertok"
-    escape "/tmp/${f}.handovers" /dev/null "$handovertok" "$PDEDUP" "$MODEL2" > /tmp/dedup_query
+  # estimated from previous handover minimal completion tokens to fit next one without a cut
+  # (at least for thinking steps, at most - for thinking plus output)
+  handovertok=$(( $sumtok * 3 / 2 + $tok ))
+  rc=1
+  while [ $rc -ne 0 ]; do
+    if [ $remtok -lt 5000 ] || [ $remtok -lt $handovertok ] || [ $(( $remtok - $handovertok )) -lt 200 ]; then
+      echo "Contex window for deduplication model $MODEL2 is exhausted!"
+      echo "Try another layout for MAXINPUTTOKENS and MAXOUTTOKENS?"
+      echo "Use START_CHUNK=$ind for altered MAXOUTTOKENS to resume on chunk $ind"
+      echo "Or RECHUNK=yes, if changing MAXINPUTTOKENS (will start from scratch)"
+      exit 1
+    fi
+
+    escape "/tmp/${f}.handovers" /dev/null "$MAXOUTTOKENS" "$PDEDUP" "$MODEL2" > /tmp/dedup_query
+    set +e
+    echo "Deduplicate bullets with model $MODEL2 and max completion tokens $remtok"
+    escape "/tmp/${f}.handovers" /dev/null "$remtok" "$PDEDUP" "$MODEL2" > /tmp/dedup_query
     query /tmp/dedup_query "$APIKEY2" "$MODELURL2" > "${c}.handovers_"
+    rc=$?
+    set -e
+    if [ $rc -ne 0 ] && [ $rc -eq 22 ]; then
+      # bisect new value to try
+      remtok=$(( ($remtok + $handovertok) / 2 )) 
+      if [ $remtok -gt $MAXOUTTOKENS ]; then
+        echo "Unexpected error: bisect value $remtok cannot exceed $MAXOUTTOKENS"
+        echo "Try another layout for MAXINPUTTOKENS and MAXOUTTOKENS?"
+        exit 1
+      fi
+      if [ $remtok -lt 5000 ]; then
+        remtok=5000
+      fi
+    else
+      echo "Unexpected error"
+      exit 1
+    fi
+  done
+
+  # recalculate for the current handover
+  tok=$(jq -r ".usage.completion_tokens" "${c}.handovers_" || echo 1)
+  tok="${tok:-null}"
+  if [ "$tok" = "null" ]; then
+    tok=1
   fi
-  jq -r '.choices[].message.content' "${c}.handovers_" > "${c}.handovers"
+  think=$(jq -r ".usage.completion_tokens_details.reasoning_tokens" "${c}.handovers_" || echo 1)
+  think="${think:-null}"
+  if [ "$think" = "null" ]; then
+    think=0
+  fi
+  delta=$(( $tok - $think ))
+  hand=$(tokencount "/tmp/${f}.handovers")
+  # assume deduplicated content would shrink the added chunk summary by a 3x times
+  required=$(( $hand + $sumtok / 3 ))
+  if [ $think -gt 1 ] && [ $delta -lt $required ]; then
+    echo "Model $MODEL2 has spent its tokens budged on thinking: $delta left of ~$required needed for output)!"
+    echo "Extract results from thinking steps instead of output(best effort)"
+    jq -r '.choices[].message.reasoning_content' "${c}.handovers_" | grep -E '^- \*\*' > "${c}.handovers"
+  else
+    jq -r '.choices[].message.content' "${c}.handovers_" > "${c}.handovers"
+  fi
   extract "${c}.handovers" > "/tmp/${f}.handovers"
 }
 
@@ -280,10 +327,11 @@ for c in $(ls -tr1 /tmp/${f}.chunk.* | grep -Ev 'query|large|bullets|summary|han
   intok=$(tokencount "$c" "/tmp/${f}.handovers")
   maxtok=$(( $MAXOUTTOKENS * $intok / $totaltok * 50 ))
   remtok=$(( $MAXINPUTTOKENS + $MAXOUTTOKENS - $intok ))
+  rc=1
   while [ $rc -ne 0 ]; do
     if [ $remtok -lt 500 ]; then
-      echo "Output tokens budged exhausted!"
-      echo "Try another layout for MAXINPUTTOKENS vs MAXOUTTOKENS?"
+      echo "Contex window for summarization model $MODEL is exhausted!"
+      echo "Try another layout for MAXINPUTTOKENS and MAXOUTTOKENS?"
       echo "Use START_CHUNK=$ind for altered MAXOUTTOKENS to resume on chunk $ind"
       echo "Or RECHUNK=yes, if changing MAXINPUTTOKENS (will start from scratch)"
       exit 1
