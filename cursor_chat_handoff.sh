@@ -73,7 +73,8 @@ function query(){
 function tokencount() {
   local out t total=0
   [ $# -ge 1 ] || { echo 0; return; }
-  for t in "$@"; do
+  IFS=$'\n'
+  for t in $(ls -1 $@); do
     out=$(count-tokens --format json "$t" 2>/dev/null || true)
     if [ "${out:-x}" = "x" ]; then
       # Fallback to a rough 4 chars per token estimate w/o count-tokens working
@@ -263,9 +264,8 @@ function rechunk() {
   IFS=$'\n'
   for m in $(ls -1 /tmp/${f}.messages.* | grep -Ev '_|__'); do
     touch "/tmp/${f}.chunk.${c}"
-    size=$(cat /tmp/${f}.chunk.${c}* "$m" | wc -c)
-    size=$(( $size / 4 + 100 ))
-    if [ $size -ge $MAXINPUTTOKENS ]; then
+    size=$(tokencount /tmp/${f}.chunk.${c}* "$m")
+    if [ $(( $size + 100 )) -ge $MAXINPUTTOKENS ]; then
       c=$(( $c + 1 ))
       echo "Starting new chunk #${c}: context filled"
     fi
