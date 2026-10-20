@@ -310,7 +310,7 @@ for c in $(ls -tr1 /tmp/${f}.chunk.* | grep -Ev 'query|large|bullets|summary|han
     fi
     prev_summary="/tmp/${f}.chunk.${prev_ind}.summary"
     touch "$prev_summary"
-    cat "/tmp/${f}.chunk.${prev_ind}.handoffs.bullets" > "/tmp/${f}.handoffs"
+    cat "/tmp/${f}.chunk.${prev_ind}.handoffs.bullets" > "/tmp/${f}.handoffs" || true
     # Accumulate dedupped inter-chunk handoffs
     extract $prev_summary >> "/tmp/${f}.handoffs"
 
