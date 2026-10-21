@@ -112,10 +112,10 @@ function dedup(){
   rc=1
   while [ $rc -ne 0 ]; do
     if [ $remtok -lt 5000 ] || [ $remtok -lt $handofftok ] || [ $(( $remtok - $handofftok )) -lt 200 ]; then
-      echo "Contex window for deduplication model $MODEL2 is exhausted!"
-      echo "Try another layout for MAXINPUTTOKENS and MAXOUTTOKENS?"
-      echo "Use START_CHUNK=$ind for altered MAXOUTTOKENS to resume on chunk $ind"
-      echo "Or RECHUNK=yes, if changing MAXINPUTTOKENS (will start from scratch)"
+      echo "Contex window for deduplication model $MODEL2 is exhausted!" 1>&2
+      echo "Try another layout for MAXINPUTTOKENS and MAXOUTTOKENS?" 1>&2
+      echo "Use START_CHUNK=$ind for altered MAXOUTTOKENS to resume on chunk $ind" 1>&2
+      echo "Or RECHUNK=yes, if changing MAXINPUTTOKENS (will start from scratch)" 1>&2
       exit 1
     fi
 
@@ -130,15 +130,15 @@ function dedup(){
       # bisect new value to try
       remtok=$(( ($remtok + $handofftok) / 2 )) 
       if [ $remtok -gt $MAXOUTTOKENS ]; then
-        echo "Unexpected error: bisect value $remtok cannot exceed $MAXOUTTOKENS"
-        echo "Try another layout for MAXINPUTTOKENS and MAXOUTTOKENS?"
+        echo "Unexpected error: bisect value $remtok cannot exceed $MAXOUTTOKENS" 1>&2
+        echo "Try another layout for MAXINPUTTOKENS and MAXOUTTOKENS?" 1>&2
         exit 1
       fi
       if [ $remtok -lt 5000 ]; then
         remtok=5000
       fi
     elif [ $rc -ne 0 ]; then
-      echo "Unexpected error"
+      echo "Unexpected error" 1>&2
       exit 1
     fi
   done
@@ -203,6 +203,7 @@ function escape() {
 
 # Skip thinking steps, extract "bullet points" as best effort
 function extract(){
+  local rc=1
   local bullets="^\s*(•|\*|-|([0-9]|[a-z])*[\.\)]) "
   if [ ! -s "$1" ]; then
     echo 
@@ -210,10 +211,20 @@ function extract(){
   fi
   cat "$1" | perl -ne 'print unless 1 .. /^<\/think>/' > "${1}.bullets"
   if [ -s "${1}.bullets" ]; then
+    set +e
     cat "${1}.bullets" | grep -E "$bullets" > "${1}.bullets_"
+    rc=$?
+    set -e
     mv -f "${1}.bullets_" "${1}.bullets"
   else
+    set +e
     cat "$1" | grep -E "$bullets" > "${1}.bullets"
+    rc=$?
+    set -e
+  fi
+  if [ $rc -ne 0 ]; then
+    echo "No summarization was provided. Exiting now" 1>&2
+    exit 1
   fi
   cat "${1}.bullets"
 }
@@ -311,7 +322,7 @@ for c in $(ls -tr1 /tmp/${f}.chunk.* | grep -Ev 'query|large|bullets|summary|han
     fi
     prev_summary="/tmp/${f}.chunk.${prev_ind}.summary"
     touch "$prev_summary"
-    cat "/tmp/${f}.chunk.${prev_ind}.handoffs.bullets" > "/tmp/${f}.handoffs" || true
+    cat "/tmp/${f}.chunk.${prev_ind}.handoffs.bullets" > "/tmp/${f}.handoffs" 2>/dev/null || true
     # Accumulate dedupped inter-chunk handoffs
     extract $prev_summary >> "/tmp/${f}.handoffs"
 
@@ -331,10 +342,10 @@ for c in $(ls -tr1 /tmp/${f}.chunk.* | grep -Ev 'query|large|bullets|summary|han
   rc=1
   while [ $rc -ne 0 ]; do
     if [ $remtok -lt 500 ]; then
-      echo "Contex window for summarization model $MODEL is exhausted!"
-      echo "Try another layout for MAXINPUTTOKENS and MAXOUTTOKENS?"
-      echo "Use START_CHUNK=$ind for altered MAXOUTTOKENS to resume on chunk $ind"
-      echo "Or RECHUNK=yes, if changing MAXINPUTTOKENS (will start from scratch)"
+      echo "Contex window for summarization model $MODEL is exhausted!" 1>&2
+      echo "Try another layout for MAXINPUTTOKENS and MAXOUTTOKENS?" 1>&2
+      echo "Use START_CHUNK=$ind for altered MAXOUTTOKENS to resume on chunk $ind" 1>&2
+      echo "Or RECHUNK=yes, if changing MAXINPUTTOKENS (will start from scratch)" 1>&2
       exit 1
     fi
     if [ $maxtok -gt $remtok ]; then
@@ -367,7 +378,7 @@ for c in $(ls -tr1 /tmp/${f}.chunk.* | grep -Ev 'query|large|bullets|summary|han
       if grep -q 'reduce the length'<<<$result ; then
         remtok=$(( $maxtok - 100 ))
       else
-        echo "Unexpected error"
+        echo "Unexpected error" 1>&2
         exit 1
       fi
     fi
