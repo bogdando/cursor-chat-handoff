@@ -12,8 +12,11 @@
 # MODEL2="rits/zai-org/glm-5-3"
 # MODELURL2=http://10.0.0.15:8000
 # BEHAVIOR="granite-4.2-3b:glm-5-3:60k:30k"
-# MAXINPUTTOKENS=60000 MAXOUTTOKENS=30000 bash ~/cursor_chat_handoff.sh \
+# MAXINPUTTOKENS=60000 MAXOUTTOKENS=30000 bash cursor_chat_handoff.sh \
 #   ~/.cursor/projects/foo/agent-transcripts/<uuid>/<uuid>.jsonl
+#
+# Start from failed chunk with adjusted params and LiteLLM proxy
+# START_CHUNK=42 MODELURL2=http://localhost:4000 MAXINPUTTOKENS=60000 MAXOUTTOKENS=35000 bash cursor_chat_handoff.sh ...
 #
 # Analyse how inter-chunks handoff docs accumulate items and deduplicate them (starts from chunk #3):
 # diff /tmp/<uuid>.jsonl.chunk.<N>.handoffs.bullets /tmp/<uuid>.jsonl.chunk.<N-1>.handoffs.bullets
