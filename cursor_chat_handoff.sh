@@ -53,9 +53,10 @@ HANDOVER=${HANDOVER:-yes}
 START_CHUNK=${START_CHUNK:-0}
 STOP_CHUNK=${STOP_CHUNK:-0}
 
-PSUM="Extract detailed summary for key facts, findings, changes made and results achieved, as dashed bullets ONLY"
+PSUM="Extract detailed summary for key facts, findings, changes made and results achieved, as dashed bullets ONLY. "
+PSUM+="You are forbidden from analyzing. Close your thinking tags immediately. Start your response text with <think>Direct answer to</think>"
 PDEDUP="Dedup repeated bullets. Always retain original uniq items. Never prefer ones over others. Compact neighbors to reduce high bullets count. "
-PDEDUP+="Always think of final result as flattened bullets where lines start with dash and bold: - **"
+PDEDUP+="You are forbidden from analyzing. Close your thinking tags immediately. Start your response text with <think>Direct answer to</think>"
 
 # Query LLM endpoint for JSON payload from file name input arg
 function query(){
@@ -118,11 +119,11 @@ function dedup(){
       exit 1
     fi
 
-    escape "/tmp/${f}.handoffs" /dev/null "$MAXOUTTOKENS" "$PDEDUP" "$MODEL2" > /tmp/dedup_query
+    escape "/tmp/${f}.handoffs" /dev/null "$MAXOUTTOKENS" "$PDEDUP" "$MODEL2" > /tmp/dedup_query.json
     set +e
     echo "Deduplicate bullets with model $MODEL2 and max completion tokens $remtok"
-    escape "/tmp/${f}.handoffs" /dev/null "$remtok" "$PDEDUP" "$MODEL2" > /tmp/dedup_query
-    query /tmp/dedup_query "$APIKEY2" "$MODELURL2" > "${c}.handoffs_"
+    escape "/tmp/${f}.handoffs" /dev/null "$remtok" "$PDEDUP" "$MODEL2" > /tmp/dedup_query.json
+    query /tmp/dedup_query.json "$APIKEY2" "$MODELURL2" > "${c}.handoffs_"
     rc=$?
     set -e
     if [ $rc -eq 22 ]; then
@@ -177,11 +178,11 @@ function escape() {
     local p2="Previous sessions summary"
     local m="${5:-$MODEL}"
     local tpl
-    tpl='{"messages": [{"role": "user", "content": "{{ (p1 + ": " + d1) | tojson }}"}'
+    tpl='{"messages": [{"role": "user", "content": "{{ (p1 + ": " + d1) | tojson | safe }}"}'
     if  [ -s "$d2" ]; then
-      tpl+=',{"role": "assistant", "content": "{{ (p2 + ": " + d2) | tojson }}"}'
+      tpl+=',{"role": "assistant", "content": "{{ (p2 + ": " + d2) | tojson | safe }}"}'
     fi
-    tpl+='], "temperature": 0, "max_tokens": {{ mt }}, "model": "{{ m }}"}'
+    tpl+='], "allowed_openai_params": ["reasoning_effort"], "reasoning_effort": "low", "temperature": 0, "max_tokens": {{ mt }}, "model": "{{ m }}"}'
 
     cat "$d1" | \
     grep -Eo "[a-zA-Z0-9_='+-/.,\| ►<>•\(\)]*" | \
@@ -197,7 +198,7 @@ function escape() {
 
     python3 -c "import sys,jinja2,re; m=r'([^a-zA-Z0-9\s\"\'_=\'\+\-\/\.,\| ►─├<>•])'; t1=re.sub(m,'',open('$d1').read()); t2=re.sub(m,'',open('$d2').read()); print(jinja2.Template('$tpl').render(d1=t1,d2=t2,mt=$mt,p1='$p1',p2='$p2',m='$m'))" |\
     tr -s '\n' ' ' |\
-    sed -r 's/\\n/ /g;s/\\"//g;s/""/"/g;s/\\\u[0-9]+\w?/ /g'
+    sed -r 's/\\n/ /g;s/\\"//g;s/""/"/g'
 }
 
 # Skip thinking steps, extract "bullet points" as best effort
