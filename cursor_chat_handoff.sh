@@ -161,7 +161,7 @@ function dedup(){
   if [ $think -gt 1 ] && [ $delta -lt $required ]; then
     echo "Model $MODEL2 has spent its tokens budged on thinking: $delta left of ~$required needed for output)!"
     echo "Extract results from thinking steps instead of output(best effort)"
-    jq -r '.choices[].message.reasoning_content' "${c}.handoffs_" | grep -E '^- \*\*' > "${c}.handoffs"
+    jq -r '.choices[].message.reasoning_content' "${c}.handoffs_" > "${c}.handoffs"
   else
     jq -r '.choices[].message.content' "${c}.handoffs_" > "${c}.handoffs"
   fi
