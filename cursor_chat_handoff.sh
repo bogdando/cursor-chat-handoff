@@ -159,11 +159,11 @@ function dedup(){
   # assume deduplicated content would shrink the added chunk summary by a 3x times
   required=$(( $hand + $sumtok / 3 ))
   if [ $think -gt 1 ] && [ $delta -lt $required ]; then
-    echo "Model $MODEL2 has spent its tokens budged on thinking: $delta left of ~$required needed for output)!"
-    echo "Extract results from thinking steps instead of output(best effort)"
-    jq -r '.choices[].message.reasoning_content' "${c}.handoffs_" > "${c}.handoffs"
+    echo "Model $MODEL2 has spent its tokens budged on thinking: $delta left of ~$required needed for output)!" 1>&2
+    echo "Extract results from thinking steps instead of output(best effort)" 1>&2
+    get_bullets_thinking "${c}.handoffs_" > "${c}.handoffs"
   else
-    jq -r '.choices[].message.content' "${c}.handoffs_" > "${c}.handoffs"
+    get_bullets_content "${c}.handoffs_" > "${c}.handoffs"
   fi
   extract "${c}.handoffs" > "/tmp/${f}.handoffs"
 }
@@ -199,6 +199,16 @@ function escape() {
     python3 -c "import sys,jinja2,re; m=r'([^a-zA-Z0-9\s\"\'_=\'\+\-\/\.,\| ►─├<>•])'; t1=re.sub(m,'',open('$d1').read()); t2=re.sub(m,'',open('$d2').read()); print(jinja2.Template('$tpl').render(d1=t1,d2=t2,mt=$mt,p1='$p1',p2='$p2',m='$m'))" |\
     tr -s '\n' ' ' |\
     sed -r 's/\\n/ /g;s/\\"//g;s/""/"/g'
+}
+
+# Parse bullets list to format properly (based on extract() bullets var)
+function get_bullets_content(){
+  jq -r '.choices[].message.content | split(" *(•|\\*|-|([0-9]|[a-z])*[\\.\\)]) "; "") | map(select(. != "")) | " - " + join("\n - ")' \
+    "$1" | tr -s '\n\n' '\n'
+}
+function get_bullets_thinking(){
+  jq -r '.choices[].message.reasoning_content | split(" *(•|\\*|-|([0-9]|[a-z])*[\\.\\)]) "; "") | map(select(. != "")) | " - " + join("\n - ")' \
+    "$1" | tr -s '\n\n' '\n'
 }
 
 # Skip thinking steps, extract "bullet points" as best effort
@@ -383,7 +393,7 @@ for c in $(ls -tr1 /tmp/${f}.chunk.* | grep -Ev 'query|large|bullets|summary|han
       fi
     fi
   done
-  jq -r '.choices[].message.content' "${c}.summary_" > "${c}.summary"
+  get_bullets_content "${c}.summary_" > "${c}.summary"
 done
 
 # Aggregate to produce the final handoff document
