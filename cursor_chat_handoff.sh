@@ -410,7 +410,7 @@ fi
 
 if [ "$HANDOVER" = "yes" ]; then
   # pick the last handoff
-  cat "/tmp/${f}.chunk.${prev_ind}.handoffs.bullets" > "/tmp/${f}.handoffs"
+  cat "/tmp/${f}.chunk.${prev_ind}.handoffs.bullets" > "/tmp/${f}.handoffs" 2>/dev/null || true
   extract "${c}.summary" >> "/tmp/${f}.handoffs"
   if [ $prev_ind -gt 1 ]; then
     # create final $c.handoffs.bullets
